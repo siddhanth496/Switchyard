@@ -2,7 +2,18 @@ import { join, resolve } from "node:path";
 import { Board } from "../core/board.js";
 import { planDispatch, type Assignment } from "../core/dispatcher.js";
 import { anyOverlap, overlaps, resolveArea } from "../core/paths.js";
-import type { Agent, Area, Gate, GateKind, Project, Ticket } from "../core/types.js";
+import type { Agent, Area, Gate, GateKind, Project, Scorecard, Ticket, TicketSize } from "../core/types.js";
+import {
+  BENCH_MERGES,
+  HEADROOM,
+  POINTS,
+  addEvent,
+  deliveryPoints,
+  emptyScorecard,
+  standingFor,
+  unitPrice,
+  unitsOf,
+} from "../core/cfo.js";
 import {
   architecturePrompt,
   buildPrompt,
@@ -44,6 +55,8 @@ export interface OrchestratorConfig {
   tickMs?: number;
   /** QA test rounds before release (0 turns QA off). Bugs from the last round become known issues. */
   qaRounds?: number;
+  /** Most related tickets one engineer builds in a session (1 turns batching off). */
+  maxBatch?: number;
 }
 
 /** Starting .gitignore for every product repo: dependencies, builds, secrets and OS clutter. */
@@ -84,6 +97,8 @@ export class Orchestrator {
   private buildLoop: Promise<void> | null = null;
   private abort = new AbortController();
   private qaRound = 0;
+  private unitUsd = 0;
+  private mergeCount = 0;
   private qaNotes: string[] = [];
   private knownIssues: string[] = [];
 
@@ -103,6 +118,7 @@ export class Orchestrator {
       autoApprove: config.autoApprove ?? [],
       tickMs: config.tickMs ?? 500,
       qaRounds: config.qaRounds ?? 2,
+      maxBatch: config.maxBatch ?? 3,
     };
   }
 
@@ -206,6 +222,8 @@ export class Orchestrator {
     this.board.addAgent({ id: IDS.taskCreator, name: "Task creator", role: "task_creator" });
     this.board.addAgent({ id: IDS.qa, name: "QA", role: "qa", activity: "Tests the build before release" });
     this.qaRound = 0;
+    this.unitUsd = 0;
+    this.mergeCount = 0;
     this.qaNotes = [];
     this.knownIssues = [];
     this.board.addAgent({
@@ -341,19 +359,19 @@ export class Orchestrator {
       const members: string[] = [];
       for (let i = 1; i <= this.cfg.engineersPerArea; i++) {
         const id = `eng-${a.id}-${i}`;
-        this.board.addAgent({ id, name: `Engineer ${a.id} ${i}`, role: "engineer", area: a.id });
+        this.board.addAgent({ id, name: `Engineer ${a.id} ${i}`, role: "engineer", area: a.id, score: emptyScorecard(), standing: "normal" });
         members.push(id);
       }
       areas.push({ id: a.id, name: a.name, paths: a.paths, lead: members[0]!, members, ...(a.shared ? { shared: true } : {}) });
     }
     for (let i = 1; i <= this.cfg.floaters; i++) {
-      this.board.addAgent({ id: `eng-floater-${i}`, name: `Engineer floater ${i}`, role: "engineer" });
+      this.board.addAgent({ id: `eng-floater-${i}`, name: `Engineer floater ${i}`, role: "engineer", score: emptyScorecard(), standing: "normal" });
     }
     this.board.setAreas(areas);
     return areas;
   }
 
-  private createTickets(planned: { key: string; title: string; description: string; acceptance: string[]; area?: string; files: string[]; dependsOn: string[]; priority: number }[], areas: Area[]): void {
+  private createTickets(planned: { key: string; title: string; description: string; acceptance: string[]; area?: string; files: string[]; dependsOn: string[]; priority: number; size?: TicketSize }[], areas: Area[]): void {
     const idByKey = new Map<string, string>();
     for (const p of planned) idByKey.set(p.key, this.board.nextTicketId());
     const areaIds = new Set(areas.map((a) => a.id));
@@ -374,10 +392,12 @@ export class Orchestrator {
         files: p.files,
         dependsOn,
         priority: p.priority,
+        size: p.size ?? "M",
         status: "ready",
       });
     }
     this.board.log("info", `Task creator filed ${planned.length} tickets`);
+    this.allocateBudgets();
   }
 
   /** The area owning a ticket's files; falls back to a hint, then the shared area. */
@@ -434,7 +454,7 @@ export class Orchestrator {
       if (project.phase === "building") {
         const plan = planDispatch(
           { tickets: this.board.tickets, areas: this.board.areas, agents: this.board.agents, leases: this.board.leases },
-          { lendThreshold: this.cfg.lendThreshold },
+          { lendThreshold: this.cfg.lendThreshold, maxBatch: this.cfg.maxBatch },
         );
         for (const a of plan.assignments) this.startTicket(a);
         // Nothing running and nothing startable. If a failure is waiting on
@@ -529,12 +549,25 @@ export class Orchestrator {
         priority: 0,
         status: "ready",
         kind: "bug",
+        size: "M",
+        budgetUsd: unitsOf("M") * this.unitUsd,
       });
+      this.traceBug(bug.title, bug.files);
     }
     this.qaNotes.push(`Round ${round}: filed ${report.bugs.length} bug(s). ${report.summary}`.trim());
     this.board.updateAgent(IDS.qa, { activity: `Round ${round}: filed ${report.bugs.length} bug(s)` });
     this.board.log("warn", `QA round ${round} filed ${report.bugs.length} bug(s)`, { agentId: IDS.qa });
     return report.bugs.length;
+  }
+
+  /** Penalize whoever merged the files a QA bug points at. */
+  private traceBug(title: string, files: string[]): void {
+    if (files.length === 0) return;
+    const culprit = [...this.board.tickets]
+      .reverse()
+      .find((t) => t.status === "done" && t.kind !== "bug" && t.assignee && anyOverlap(t.changedFiles ?? t.files, files));
+    if (!culprit?.assignee) return;
+    this.score(culprit.assignee, POINTS.bugTraced, { bugs: 1 }, `QA traced "${title}" to ${culprit.id}`);
   }
 
   private async release(): Promise<void> {
@@ -589,16 +622,19 @@ ${log.slice(0, 15).map((l) => `- ${l}`).join("\n")}`;
 
   private startTicket(a: Assignment): void {
     const ticket = this.board.ticket(a.ticketId);
+    const batched = a.batch.length > 1;
     this.board.acquireLease({ ticketId: a.ticketId, agentId: a.agentId, files: a.files, acquiredAt: Date.now() });
-    this.board.moveTicket(a.ticketId, "in_progress", { assignee: a.agentId });
-    this.board.updateAgent(a.agentId, { status: "working", currentTicket: a.ticketId });
+    for (const id of a.batch) {
+      this.board.moveTicket(id, "in_progress", { assignee: a.agentId, batchWith: batched ? [...a.batch] : undefined });
+    }
+    this.board.updateAgent(a.agentId, { status: "working", currentTicket: a.batch.join(", ") });
     this.board.log(
       "info",
-      `${a.ticketId} → ${this.board.agent(a.agentId).name}${a.lent ? ` (lent to ${ticket.area})` : ""}`,
+      `${a.batch.join(" + ")} → ${this.board.agent(a.agentId).name}${a.lent ? ` (lent to ${ticket.area})` : ""}${batched ? " (batched)" : ""}`,
       { ticketId: a.ticketId, agentId: a.agentId },
     );
     const p = this.runTicket(a)
-      .catch((err) => this.sendBack(a, `Unexpected error: ${(err as Error).message}`))
+      .catch((err) => this.sendBack(a, `Unexpected error: ${(err as Error).message}`, { penalty: 0 }))
       .finally(() => {
         this.running.delete(a.ticketId);
         this.poke();
@@ -608,12 +644,22 @@ ${log.slice(0, 15).map((l) => `- ${l}`).join("\n")}`;
 
   private async runTicket(a: Assignment): Promise<void> {
     const repo = this.repo!;
-    const t = this.board.ticket(a.ticketId);
+    const tickets = a.batch.map((id) => this.board.ticket(id));
+    const t = tickets[0]!;
+    const ids = a.batch.join(" + ");
     const worktree = await repo.openWorktree(t.id);
     const notes = repo.readMain(`docs/owners/${t.area}.md`);
+    const agent = this.board.agent(a.agentId);
+
+    // The CFO's budget for this session, and the hard cut-off.
+    const allotted = tickets.reduce((n, x) => n + (x.budgetUsd ?? unitsOf(x.size) * this.unitUsd), 0);
+    const spentBefore = tickets.reduce((n, x) => n + (x.buildSpendUsd ?? 0), 0);
+    const cap = allotted > 0 ? Math.max(0.05, allotted * HEADROOM[agent.standing ?? "normal"]) : undefined;
 
     // Build
-    const skippedDeps = t.dependsOn
+    const inBatch = new Set(a.batch);
+    const skippedDeps = [...new Set(tickets.flatMap((x) => x.dependsOn))]
+      .filter((id) => !inBatch.has(id))
       .map((id) => this.board.ticket(id))
       .filter((d) => d.status === "skipped")
       .map((d) => ({ id: d.id, title: d.title }));
@@ -623,24 +669,42 @@ ${log.slice(0, 15).map((l) => `- ${l}`).join("\n")}`;
         kind: "build",
         systemPrompt: systemPrompts.engineer,
         prompt: buildPrompt(t, notes, this.prd, {
+          batch: tickets,
           skippedDeps,
           escalation: t.escalated ? { failures: t.failures ?? [] } : undefined,
+          budget: cap ? { allotted, spent: spentBefore, cap } : undefined,
+          trackRecord: this.trackRecordNote(agent),
         }),
         cwd: worktree,
         canWrite: true,
         escalated: t.escalated,
-        context: { ticket: { ...t }, prd: this.prd },
+        budgetUsd: cap,
+        context: { ticket: { ...t }, batch: tickets.map((x) => ({ ...x })), prd: this.prd },
       },
-      t.id,
+      a.batch,
     );
-    if (!build.ok) return this.sendBack(a, `Build failed: ${build.error ?? "unknown error"}`);
+    // Build spend is tracked per ticket for the CFO, split evenly in a batch.
+    for (const x of tickets) {
+      this.board.updateTicket(x.id, { buildSpendUsd: (x.buildSpendUsd ?? 0) + build.costUsd / tickets.length });
+    }
+    if (!build.ok) {
+      if (build.overBudget) {
+        return this.sendBack(
+          a,
+          `Ran out of budget: cut off at $${(cap ?? 0).toFixed(2)} (budget $${allotted.toFixed(2)}). Take a narrower approach: ` +
+            "read only the files you need, reuse existing code, and skip optional extras.",
+          { penalty: POINTS.cutOff, cutOff: true },
+        );
+      }
+      return this.sendBack(a, `Build failed: ${build.error ?? "unknown error"}`);
+    }
 
-    const committed = await repo.commitWorktree(t.id, `${t.id}: ${t.title}`);
+    const committed = await repo.commitWorktree(t.id, `${ids}: ${tickets.map((x) => x.title).join("; ")}`);
     if (!committed) return this.sendBack(a, "No changes were made.");
 
     // Lease check: touching files someone else holds is a conflict.
     const changed = await repo.changedFiles(t.id);
-    this.board.updateTicket(t.id, { changedFiles: changed });
+    for (const x of tickets) this.board.updateTicket(x.id, { changedFiles: changed });
     const others = this.board.leases.filter((l) => l.ticketId !== t.id);
     const clashes = others.filter((l) => anyOverlap(l.files, changed));
     if (clashes.length > 0) {
@@ -654,25 +718,25 @@ ${log.slice(0, 15).map((l) => `- ${l}`).join("\n")}`;
     }
     const outside = changed.filter((f) => !anyOverlap([f], a.files));
     if (outside.length > 0) {
-      this.board.log("warn", `${t.id} also changed ${outside.join(", ")} (outside its lease, no conflict)`, {
+      this.board.log("warn", `${ids} also changed ${outside.join(", ")} (outside its lease, no conflict)`, {
         ticketId: t.id,
       });
     }
 
     // Review
-    this.board.moveTicket(t.id, "review");
+    for (const x of tickets) this.board.moveTicket(x.id, "review");
     this.board.updateAgent(a.agentId, { activity: "Waiting for review" });
     const review = await this.runAgent(
       IDS.techLead,
       {
         kind: "review",
         systemPrompt: systemPrompts.reviewer,
-        prompt: reviewPrompt(t, await repo.diff(t.id)),
+        prompt: reviewPrompt(t, await repo.diff(t.id), tickets),
         cwd: worktree,
         canWrite: false,
-        context: { ticket: { ...this.board.ticket(t.id) } },
+        context: { ticket: { ...this.board.ticket(t.id) }, batch: a.batch.map((id) => ({ ...this.board.ticket(id) })) },
       },
-      t.id,
+      a.batch,
       { keepStatus: true },
     );
     let verdict: { verdict: "approve" | "changes"; feedback: string };
@@ -682,16 +746,16 @@ ${log.slice(0, 15).map((l) => `- ${l}`).join("\n")}`;
       verdict = review.ok
         ? { verdict: "approve", feedback: "" }
         : { verdict: "changes", feedback: `Review failed: ${review.error ?? "unknown"}` };
-      if (review.ok) this.board.log("warn", `${t.id}: review output unreadable; approving`, { ticketId: t.id });
+      if (review.ok) this.board.log("warn", `${ids}: review output unreadable; approving`, { ticketId: t.id });
     }
     this.board.updateAgent(IDS.techLead, {
-      activity: `Reviewed ${t.id}: ${verdict.verdict === "approve" ? "approved" : "changes requested"}`,
+      activity: `Reviewed ${ids}: ${verdict.verdict === "approve" ? "approved" : "changes requested"}`,
     });
     if (verdict.verdict === "changes") return this.sendBack(a, verdict.feedback || "Changes requested.");
 
     // Merge
-    const merged = await repo.merge(t.id, `Merge ${t.id}: ${t.title}`);
-    if (!merged.ok) return this.sendBack(a, `Merge conflict with main: ${merged.error}`);
+    const merged = await repo.merge(t.id, `Merge ${ids}: ${tickets.map((x) => x.title).join("; ")}`);
+    if (!merged.ok) return this.sendBack(a, `Merge conflict with main: ${merged.error}`, { penalty: 0 });
 
     // Owner notes: the area lead is the only writer.
     let report = { summary: "", notes: "" };
@@ -705,16 +769,30 @@ ${log.slice(0, 15).map((l) => `- ${l}`).join("\n")}`;
       const path = `docs/owners/${area.id}.md`;
       const lead = this.board.agent(area.lead).name;
       await repo.commitToMain(
-        { [path]: `${repo.readMain(path).trimEnd()}\n- ${report.notes.trim()} _(${t.id}, recorded by ${lead})_\n` },
-        `${lead}: owner notes for ${t.id}`,
+        { [path]: `${repo.readMain(path).trimEnd()}\n- ${report.notes.trim()} _(${ids}, recorded by ${lead})_\n` },
+        `${lead}: owner notes for ${ids}`,
       );
     }
 
     await repo.closeWorktree(t.id, true);
     this.board.releaseLease(t.id);
-    this.board.moveTicket(t.id, "done", { feedback: undefined });
-    this.board.updateAgent(a.agentId, { status: "idle", currentTicket: undefined, activity: `Shipped ${t.id}` });
-    this.board.log("info", `${t.id} merged: ${t.title}`, { ticketId: t.id, agentId: a.agentId });
+    for (const x of tickets) this.board.moveTicket(x.id, "done", { feedback: undefined });
+    this.board.updateAgent(a.agentId, { status: "idle", currentTicket: undefined, activity: `Shipped ${ids}` });
+    this.board.log("info", `${ids} merged: ${tickets.map((x) => x.title).join("; ")}`, { ticketId: t.id, agentId: a.agentId });
+
+    // The CFO scores the delivery: cost against budget, and whether it passed first time.
+    const spent = a.batch.reduce((n, id) => n + (this.board.ticket(id).buildSpendUsd ?? 0), 0);
+    const ratio = allotted > 0 ? spent / allotted : 0;
+    const firstPass = tickets.every((x) => x.attempts === 0);
+    const points = deliveryPoints(firstPass, ratio);
+    this.score(a.agentId, points, {
+      delivered: tickets.length,
+      firstPass: firstPass ? 1 : 0,
+      onBudget: ratio <= 1 ? 1 : 0,
+      overruns: ratio > 1 ? 1 : 0,
+    }, `${ids} merged${firstPass ? " first pass" : ""} at ${Math.round(ratio * 100)}% of its $${allotted.toFixed(2)} budget`);
+    this.mergeCount++;
+    this.liftBenches();
     this.checkBudget();
   }
 
@@ -722,27 +800,124 @@ ${log.slice(0, 15).map((l) => `- ${l}`).join("\n")}`;
    * A failed or rejected attempt. The owner gets the early attempts; the
    * last one is escalated to the tech lead with the full failure history.
    * If that fails too, the CEO decides: retry with guidance, or skip.
+   * A rejected batch splits back into single tickets for the retry.
    */
-  private async sendBack(a: Assignment, feedback: string, opts: { discardBranch?: boolean } = {}): Promise<void> {
-    const t = this.board.ticket(a.ticketId);
-    const attempts = t.attempts + 1;
-    const failures = [...(t.failures ?? []), feedback];
-    await this.repo!.closeWorktree(t.id, opts.discardBranch ?? false).catch(() => undefined);
-    this.board.releaseLease(t.id);
-    this.board.updateAgent(a.agentId, { status: "idle", currentTicket: undefined, activity: `Sent back ${t.id}` });
-    const meta = { ticketId: t.id, agentId: a.agentId };
+  private async sendBack(
+    a: Assignment,
+    feedback: string,
+    opts: { discardBranch?: boolean; penalty?: number; cutOff?: boolean } = {},
+  ): Promise<void> {
+    const batched = a.batch.length > 1;
+    await this.repo!.closeWorktree(a.ticketId, opts.discardBranch || batched).catch(() => undefined);
+    this.board.releaseLease(a.ticketId);
+    this.board.updateAgent(a.agentId, { status: "idle", currentTicket: undefined, activity: `Sent back ${a.batch.join(", ")}` });
 
-    if (attempts >= this.cfg.maxAttempts) {
-      this.board.moveTicket(t.id, "failed", { attempts, feedback, failures, assignee: undefined, escalated: false });
-      this.board.log("error", `${t.id} failed after ${attempts} attempts: ${feedback}`, meta);
-      this.askCeoAboutFailure(t.id);
-      return;
+    const penalty = opts.penalty ?? POINTS.sentBack;
+    if (penalty !== 0) {
+      this.score(
+        a.agentId,
+        penalty,
+        opts.cutOff ? { overruns: 1, reworks: 1 } : { reworks: 1 },
+        `${a.batch.join(" + ")} ${opts.cutOff ? "cut off for overspending" : "sent back"}`,
+      );
+    }
+    if (batched) {
+      this.board.log("info", `Batch ${a.batch.join(" + ")} split back into single tickets for the retry`, {
+        ticketId: a.ticketId,
+      });
     }
 
-    const escalate = attempts === this.cfg.maxAttempts - 1;
-    this.board.moveTicket(t.id, "ready", { attempts, feedback, failures, assignee: undefined, escalated: escalate });
-    this.board.log("warn", `${t.id} sent back: ${feedback}`, meta);
-    if (escalate) this.board.log("info", `${t.id} escalated to the tech lead for its last attempt`, meta);
+    for (const id of a.batch) {
+      const t = this.board.ticket(id);
+      const attempts = t.attempts + 1;
+      const failures = [...(t.failures ?? []), feedback];
+      const meta = { ticketId: t.id, agentId: a.agentId };
+      const common = { attempts, feedback, failures, assignee: undefined, batchWith: undefined, noBatch: batched || t.noBatch };
+
+      if (attempts >= this.cfg.maxAttempts) {
+        this.board.moveTicket(t.id, "failed", { ...common, escalated: false });
+        this.board.log("error", `${t.id} failed after ${attempts} attempts: ${feedback}`, meta);
+        this.askCeoAboutFailure(t.id);
+        continue;
+      }
+      const escalate = attempts === this.cfg.maxAttempts - 1;
+      this.board.moveTicket(t.id, "ready", { ...common, escalated: escalate });
+      this.board.log("warn", `${t.id} sent back: ${feedback}`, meta);
+      if (escalate) this.board.log("info", `${t.id} escalated to the tech lead for its last attempt`, meta);
+    }
+  }
+
+  // ---- CFO -------------------------------------------------------------
+
+  /** Record a scored event for an engineer and update its standing. */
+  private score(agentId: string, points: number, counts: Partial<Omit<Scorecard, "recent">>, reason: string): void {
+    const agent = this.board.agent(agentId);
+    if (agent.role !== "engineer") return; // the tech lead's escalations aren't scored
+    const card = addEvent(agent.score ?? emptyScorecard(), points, counts);
+    const was = agent.standing ?? "normal";
+    let standing = standingFor(card.recent);
+    let benchedUntilMerges = agent.benchedUntilMerges;
+    if (was === "benched" && benchedUntilMerges !== undefined && this.mergeCount < benchedUntilMerges) {
+      standing = "benched"; // the bench runs its course
+    } else if (standing === "benched") {
+      benchedUntilMerges = this.mergeCount + BENCH_MERGES;
+    }
+    this.board.updateAgent(agentId, { score: card, standing, benchedUntilMerges });
+    const sign = points > 0 ? `+${points}` : `${points}`;
+    this.board.log(points < 0 ? "warn" : "info", `CFO ${sign} to ${agent.name}: ${reason}`, { agentId: IDS.cfo });
+    if (standing !== was) {
+      const msg = {
+        trusted: "now trusted: first pick of big tickets and more budget headroom",
+        normal: "back to normal standing",
+        watch: "on watch: smaller tickets, a tight spend cap and a warning in its next prompt",
+        benched: `benched until ${BENCH_MERGES} more merges land; others take its work`,
+      }[standing];
+      this.board.log(standing === "trusted" || standing === "normal" ? "info" : "warn", `CFO: ${agent.name} is ${msg}`, {
+        agentId: IDS.cfo,
+      });
+    }
+  }
+
+  /** Benched engineers come back on watch once enough merges have landed. */
+  private liftBenches(): void {
+    for (const agent of this.board.agents) {
+      if (agent.standing === "benched" && (agent.benchedUntilMerges ?? 0) <= this.mergeCount) {
+        const card = { ...(agent.score ?? emptyScorecard()), recent: [POINTS.sentBack * 2] };
+        this.board.updateAgent(agent.id, { standing: "watch", score: card, benchedUntilMerges: undefined });
+        this.board.log("info", `CFO: ${agent.name} is off the bench, on watch`, { agentId: IDS.cfo });
+      }
+    }
+  }
+
+  /** What the CFO tells an engineer about its recent record, in its prompt. */
+  private trackRecordNote(agent: Agent): string | undefined {
+    const card = agent.score;
+    if (!card || card.recent.length === 0) return undefined;
+    const bad = card.recent.filter((p) => p < 0).length;
+    if (agent.standing === "watch" || agent.standing === "benched") {
+      return `ON WATCH. ${bad} of your last ${card.recent.length} scored tickets went over budget, were sent back or had bugs \
+traced to them. Your spend cap is tight on this one. Make the smallest correct change and verify it before you finish.`;
+    }
+    if (agent.standing === "trusted") {
+      return "TRUSTED. Strong recent record on cost and quality; you have extra budget headroom. Keep the same standard.";
+    }
+    return undefined;
+  }
+
+  /** Split the ticket budget pool by size, keeping a reserve for reviews, QA and retries. */
+  private allocateBudgets(): void {
+    const p = this.board.project!;
+    const open = this.board.tickets.filter((t) => !["done", "skipped"].includes(t.status));
+    this.unitUsd = unitPrice(p.budgetUsd - p.spentUsd, open.map((t) => t.size));
+    for (const t of open) this.board.updateTicket(t.id, { budgetUsd: unitsOf(t.size) * this.unitUsd });
+    const pool = open.reduce((n, t) => n + unitsOf(t.size) * this.unitUsd, 0);
+    const price = (s: "S" | "M" | "L") => `${s} $${(unitsOf(s) * this.unitUsd).toFixed(2)}`;
+    this.board.log(
+      "info",
+      `CFO allocated $${pool.toFixed(2)} across ${open.length} tickets by size (${price("S")}, ${price("M")}, ${price("L")}), ` +
+        `keeping $${(p.budgetUsd - p.spentUsd - pool).toFixed(2)} for reviews, QA and retries`,
+      { agentId: IDS.cfo },
+    );
   }
 
   /** Open a decision card for a failed ticket. Other work keeps going meanwhile. */
@@ -793,7 +968,7 @@ ${(t.failures ?? []).map((f, i) => `${i + 1}. ${f}`).join("\n")}
   private async runAgent(
     agentId: string,
     task: Omit<AgentTask, "agentId" | "role">,
-    ticketId?: string,
+    ticketIds: string[] = [],
     opts: { keepStatus?: boolean } = {},
   ): Promise<AgentResult> {
     const agent = this.board.agent(agentId);
@@ -804,7 +979,8 @@ ${(t.failures ?? []).map((f, i) => `${i + 1}. ${f}`).join("\n")}
       (line) => this.board.updateAgent(agentId, { activity: line }),
       this.abort.signal,
     );
-    this.board.addSpend(agentId, res.costUsd, ticketId);
+    if (ticketIds.length === 0) this.board.addSpend(agentId, res.costUsd);
+    for (const id of ticketIds) this.board.addSpend(agentId, res.costUsd / ticketIds.length, id);
     this.checkBudget();
     if (!opts.keepStatus && task.kind !== "build") {
       const finished = { prd: "Handed in the PRD", architecture: "Handed in the architecture", tickets: "Filed the tickets", review: "", build: "", qa: "" }[task.kind];
@@ -843,6 +1019,7 @@ ${(t.failures ?? []).map((f, i) => `${i + 1}. ${f}`).join("\n")}
       (g) => {
         if (g.status === "approved") {
           this.board.updateProject({ phase: "building", budgetUsd: p.budgetUsd + this.cfg.budgetUsd });
+          this.allocateBudgets();
         } else {
           this.board.log("warn", "CEO declined more budget; stopping");
           this.stop();

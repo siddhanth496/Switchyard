@@ -13,6 +13,10 @@ export interface MockRunnerOptions {
   qaFindsBugOnce?: boolean;
   /** QA reports this bug every round, to test the round limit. */
   qaAlwaysFinds?: string;
+  /** Ticket titles (substring match) whose first build blows its spend cap. */
+  overspendFirstBuildOf?: string[];
+  /** Cost of building one ticket, in USD (default 0.02). */
+  buildCostUsd?: number;
 }
 
 /**
@@ -29,7 +33,13 @@ export class MockRunner implements AgentRunner {
   private readonly qaFindsBugOnce: boolean;
   private readonly qaAlwaysFinds?: string;
 
+  private readonly overspendOnce: string[];
+  private readonly overspent = new Set<string>();
+  private readonly buildCost: number;
+
   constructor(options: MockRunnerOptions = {}) {
+    this.overspendOnce = options.overspendFirstBuildOf ?? [];
+    this.buildCost = options.buildCostUsd ?? 0.02;
     this.qaFindsBugOnce = options.qaFindsBugOnce ?? false;
     this.qaAlwaysFinds = options.qaAlwaysFinds;
     this.stepMs = options.stepMs ?? 250;
@@ -64,26 +74,38 @@ export class MockRunner implements AgentRunner {
       }
       case "build": {
         const t = task.context.ticket!;
+        const batch = task.context.batch ?? [t];
         await step(`Reading owner notes for ${t.area}`);
-        if (this.alwaysFail.some((s) => t.title.includes(s))) {
+        if (batch.some((b) => this.alwaysFail.some((s) => b.title.includes(s)))) {
           await step("Running checks");
           return { ok: false, text: "", costUsd: 0.01, error: "Build broke: 3 tests failing in the layout grid" };
         }
-        for (const f of t.files) {
-          const file = f.endsWith("/") ? join(f, "index.ts") : f;
-          await step(`Write: ${file}`);
-          const abs = join(task.cwd, file);
-          mkdirSync(dirname(abs), { recursive: true });
-          const prior = existsSync(abs) ? readFileSync(abs, "utf8") : "";
-          writeFileSync(abs, `${prior}${stub(file, t.id, t.title, t.attempts)}`);
+        // A wasteful first attempt: blows through whatever cap it was given.
+        const waste = batch.find((b) => this.overspendOnce.some((s) => b.title.includes(s)) && !this.overspent.has(b.id));
+        if (waste) {
+          this.overspent.add(waste.id);
+          await step("Reading the whole codebase, twice");
+          const cap = task.budgetUsd ?? 1;
+          return { ok: false, text: "", costUsd: cap, error: "cut off at its spend cap", overBudget: true };
+        }
+        for (const b of batch) {
+          for (const f of b.files) {
+            const file = f.endsWith("/") ? join(f, "index.ts") : f;
+            await step(`Write: ${file}`);
+            const abs = join(task.cwd, file);
+            mkdirSync(dirname(abs), { recursive: true });
+            const prior = existsSync(abs) ? readFileSync(abs, "utf8") : "";
+            writeFileSync(abs, `${prior}${stub(file, b.id, b.title, b.attempts)}`);
+          }
         }
         await step("Running checks");
+        const cost = Math.min(this.buildCost * batch.length, task.budgetUsd ?? Infinity);
         return ok(
-          `Implemented ${t.title}.\n\n\`\`\`json\n${JSON.stringify({
-            summary: `Built ${t.title}`,
-            notes: `${t.id}: ${t.title} lives in ${t.files.join(", ")}.`,
+          `Implemented ${batch.map((b) => b.title).join(", ")}.\n\n\`\`\`json\n${JSON.stringify({
+            summary: `Built ${batch.map((b) => b.title).join(", ")}`,
+            notes: batch.map((b) => `${b.id}: ${b.title} lives in ${b.files.join(", ")}.`).join(" "),
           })}\n\`\`\``,
-          0.02,
+          cost,
         );
       }
       case "qa": {
@@ -113,11 +135,11 @@ export class MockRunner implements AgentRunner {
       }
       case "review": {
         const t = task.context.ticket!;
-        await step(`Reviewing ${t.id} diff`);
-        const shouldReject =
-          this.rejectOnce.some((s) => t.title.includes(s)) && !this.rejected.has(t.id);
-        if (shouldReject) {
-          this.rejected.add(t.id);
+        const batch = task.context.batch ?? [t];
+        await step(`Reviewing ${batch.map((b) => b.id).join(", ")} diff`);
+        const target = batch.find((b) => this.rejectOnce.some((s) => b.title.includes(s)) && !this.rejected.has(b.id));
+        if (target) {
+          this.rejected.add(target.id);
           return ok(
             '```json\n{"verdict": "changes", "feedback": "Handle the empty state and validate input."}\n```',
             0.005,
@@ -186,12 +208,12 @@ const MOCK_TICKETS = `\`\`\`json
 ${JSON.stringify(
   {
     tickets: [
-      { key: "setup", title: "Project manifest and DB schema", area: "shared", files: ["package.json", "db/schema.sql"], acceptance: ["notes and users tables exist"], dependsOn: [], priority: 0 },
-      { key: "shell", title: "App shell and styles", area: "web", files: ["web/index.html", "web/styles.css"], acceptance: ["Shared header and layout"], dependsOn: [], priority: 1 },
-      { key: "api-auth", title: "Auth API", area: "api", files: ["api/auth.ts"], acceptance: ["POST /login returns a session"], dependsOn: ["setup"], priority: 1 },
-      { key: "api-notes", title: "Notes CRUD API", area: "api", files: ["api/notes.ts"], acceptance: ["CRUD endpoints persist to SQLite"], dependsOn: ["setup"], priority: 1 },
-      { key: "web-login", title: "Login page", area: "web", files: ["web/login.html"], acceptance: ["Shows an error on bad password"], dependsOn: ["api-auth", "shell"], priority: 1 },
-      { key: "web-notes", title: "Notes list page", area: "web", files: ["web/notes.html"], acceptance: ["Newest first", "Create, edit, delete"], dependsOn: ["api-notes", "shell"], priority: 1 },
+      { key: "setup", title: "Project manifest and DB schema", area: "shared", files: ["package.json", "db/schema.sql"], acceptance: ["notes and users tables exist"], dependsOn: [], priority: 0, size: "S" },
+      { key: "shell", title: "App shell and styles", area: "web", files: ["web/index.html", "web/styles.css"], acceptance: ["Shared header and layout"], dependsOn: [], priority: 1, size: "M" },
+      { key: "api-auth", title: "Auth API", area: "api", files: ["api/auth.ts"], acceptance: ["POST /login returns a session"], dependsOn: ["setup"], priority: 1, size: "M" },
+      { key: "api-notes", title: "Notes CRUD API", area: "api", files: ["api/notes.ts"], acceptance: ["CRUD endpoints persist to SQLite"], dependsOn: ["setup"], priority: 1, size: "L" },
+      { key: "web-login", title: "Login page", area: "web", files: ["web/login.html"], acceptance: ["Shows an error on bad password"], dependsOn: ["api-auth", "shell"], priority: 1, size: "S" },
+      { key: "web-notes", title: "Notes list page", area: "web", files: ["web/notes.html"], acceptance: ["Newest first", "Create, edit, delete"], dependsOn: ["api-notes", "shell"], priority: 1, size: "M" },
     ],
   },
   null,

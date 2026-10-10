@@ -40,7 +40,9 @@ deep one: most tickets should depend on at most one foundation ticket, not on ea
 - Acceptance criteria must be checkable by an engineer inside the repo: code, tests, scripts, docs. Never \
 require cloud accounts, deployed services, real credentials or manual steps by a person (for example \
 "run the backup in production"); write those as a note in the description for the CEO instead.
-- Priority: 0 for foundations, 1 for features, 2 for polish.`,
+- Priority: 0 for foundations, 1 for features, 2 for polish.
+- Size each ticket for the CFO's budget: "S" (a small, contained change), "M" (a typical feature slice), \
+"L" (a large or tricky piece). Most tickets should be S or M; split anything bigger than L.`,
 
   engineer: `${COMPANY}
 
@@ -108,18 +110,39 @@ export function ticketsPrompt(prd: string, architecture: string, areas: Area[]):
   return `PRD:\n\n${prd}\n\nArchitecture:\n\n${architecture}\n\nOwnership areas:\n${areaList}\n\n\
 Break the work into tickets. Finish with a JSON block:
 \`\`\`json
-{"tickets": [{"key": "setup", "title": "...", "description": "...", "acceptance": ["..."], "area": "shared", "files": ["package.json"], "dependsOn": [], "priority": 0}]}
+{"tickets": [{"key": "setup", "title": "...", "description": "...", "acceptance": ["..."], "area": "shared", "files": ["package.json"], "dependsOn": [], "priority": 0, "size": "S"}]}
 \`\`\``;
 }
 
 export interface BuildExtras {
+  /** Every ticket in the session when batched, the primary first. */
+  batch?: Ticket[];
+  /** The CFO's budget for this work and the hard cut-off. */
+  budget?: { allotted: number; spent: number; cap: number };
+  /** A note from the CFO about this engineer's recent record. */
+  trackRecord?: string;
   /** Dependencies the CEO skipped: their work is not in the codebase. */
   skippedDeps?: { id: string; title: string }[];
   /** Set when the tech lead takes over after repeated failures. */
   escalation?: { failures: string[] };
 }
 
+/** One ticket's section of a build prompt. */
+function ticketBlock(t: Ticket): string {
+  return `Ticket ${t.id}: ${t.title}
+
+${t.description}
+
+Acceptance criteria:
+${t.acceptance.map((a) => `- ${a}`).join("\n") || "- (none listed)"}
+
+Files you own for this ticket:
+${t.files.map((f) => `- ${f}`).join("\n")}
+${t.feedback ? `\nThe reviewer requested changes on the last attempt:\n${t.feedback}\n` : ""}`;
+}
+
 export function buildPrompt(ticket: Ticket, ownerNotes: string, prd: string, extras: BuildExtras = {}): string {
+  const batch = extras.batch && extras.batch.length > 1 ? extras.batch : [ticket];
   const escalation = extras.escalation
     ? `\nESCALATED: you are the tech lead taking over after ${extras.escalation.failures.length} failed attempts. \
 Find the root cause instead of repeating them. If the ticket is too big or wrongly scoped, deliver the smallest \
@@ -133,16 +156,20 @@ ${extras.escalation.failures.map((f, i) => `${i + 1}. ${f}`).join("\n")}
 the codebase. Build without it: stub or mock anything you need from it, and note the stubs in your report.
 `
     : "";
-  return `Ticket ${ticket.id}: ${ticket.title}${escalation}${skipped}
-
-${ticket.description}
-
-Acceptance criteria:
-${ticket.acceptance.map((a) => `- ${a}`).join("\n") || "- (none listed)"}
-
-Files you own for this ticket:
-${ticket.files.map((f) => `- ${f}`).join("\n")}
-${ticket.feedback ? `\nThe reviewer requested changes on your last attempt:\n${ticket.feedback}\n` : ""}
+  const budget = extras.budget
+    ? `\nBudget: $${extras.budget.allotted.toFixed(2)} for this work${extras.budget.spent > 0 ? ` ($${extras.budget.spent.toFixed(2)} already spent on earlier attempts)` : ""}. \
+The run is cut off at $${extras.budget.cap.toFixed(2)}. Be focused: read only what you need, make the smallest change that meets \
+the criteria, and skip optional extras. The CFO scores you on cost AND quality: going over budget costs points, \
+and so does work sent back by review or bugs QA traces to you. Cutting corners to save money is not a win.
+`
+    : "";
+  const record = extras.trackRecord ? `\nYour track record: ${extras.trackRecord}\n` : "";
+  const intro =
+    batch.length > 1
+      ? `You are building ${batch.length} related tickets in one session: ${batch.map((t) => t.id).join(", ")}. \
+Build them in the order listed (later ones may build on earlier ones). They are reviewed and merged together.\n\n`
+      : "";
+  return `${intro}${batch.map(ticketBlock).join("\n---\n\n")}${escalation}${skipped}${budget}${record}
 Owner notes for area "${ticket.area}":
 ${ownerNotes.trim() || "(none yet)"}
 
@@ -179,12 +206,20 @@ ${areaList}
 ${previous}`;
 }
 
-export function reviewPrompt(ticket: Ticket, diff: string): string {
+export function reviewPrompt(ticket: Ticket, diff: string, batch: Ticket[] = [ticket]): string {
   const clipped = diff.length > 60_000 ? `${diff.slice(0, 60_000)}\n... (diff truncated)` : diff;
-  return `Review ticket ${ticket.id}: ${ticket.title}
+  const header =
+    batch.length > 1
+      ? `Review ${batch.length} tickets built together: ${batch.map((t) => `${t.id} ${t.title}`).join("; ")}. \
+Approve only if every one meets its criteria.`
+      : `Review ticket ${ticket.id}: ${ticket.title}`;
+  const criteria = batch
+    .map((t) => `${batch.length > 1 ? `${t.id}:\n` : ""}${t.acceptance.map((a) => `- ${a}`).join("\n") || "- (none listed)"}`)
+    .join("\n");
+  return `${header}
 
 Acceptance criteria:
-${ticket.acceptance.map((a) => `- ${a}`).join("\n") || "- (none listed)"}
+${criteria}
 
 Diff against main:
 \`\`\`diff

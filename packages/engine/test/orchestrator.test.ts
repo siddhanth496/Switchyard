@@ -118,7 +118,8 @@ describe("orchestrator (mock agents, real git)", () => {
           await new Promise((r) => setTimeout(r, 400));
         }
         if (task.kind === "build" && t?.title === "App shell and styles" && t.attempts === 0) {
-          const res = await this.inner.run({ ...task, context: { ...task.context, ticket: { ...t, files: [...t.files, "package.json"] } } }, onActivity);
+          const trespassing = { ...t, files: [...t.files, "package.json"] };
+          const res = await this.inner.run({ ...task, context: { ...task.context, ticket: trespassing, batch: [trespassing] } }, onActivity);
           return res;
         }
         return this.inner.run(task, onActivity);
@@ -290,5 +291,73 @@ describe("QA", () => {
     await orch.run("A notes app");
     expect(calls.qa).toBe(0);
     expect(orch.board.gates.find((g) => g.kind === "release")!.content).toContain("**QA:** turned off");
+  }, 30_000);
+});
+
+describe("CFO budgets and scorecards", () => {
+  it("budgets every ticket by size from the project budget, keeping a reserve", async () => {
+    const orch = new Orchestrator(new MockRunner({ stepMs: 0 }), { workspaceDir: workspace(), autoApprove: "all", tickMs: 5, budgetUsd: 10 });
+    orch.start("A notes app");
+    await waitFor(() => (orch.board.tickets.length === 6 ? true : undefined));
+    const byTitle = (s: string) => orch.board.tickets.find((t) => t.title.startsWith(s))!;
+    const s = byTitle("Project manifest").budgetUsd!;
+    const m = byTitle("App shell").budgetUsd!;
+    const l = byTitle("Notes CRUD API").budgetUsd!;
+    expect(m).toBeCloseTo(2 * s);
+    expect(l).toBeCloseTo(4 * s);
+    const total = orch.board.tickets.reduce((n, t) => n + (t.budgetUsd ?? 0), 0);
+    expect(total).toBeLessThanOrEqual(10 * 0.75 + 1e-9);
+    await waitFor(() => (orch.board.project!.phase === "shipped" ? true : undefined), 20_000);
+  }, 30_000);
+
+  it("cuts off an overspending attempt, penalizes it, and rewards clean deliveries", async () => {
+    const orch = new Orchestrator(
+      new MockRunner({ stepMs: 0, overspendFirstBuildOf: ["Notes CRUD API"] }),
+      { workspaceDir: workspace(), autoApprove: "all", tickMs: 5, qaRounds: 0, maxBatch: 1 },
+    );
+    const project = await orch.run("A notes app");
+    expect(project.phase).toBe("shipped");
+    const crud = orch.board.tickets.find((t) => t.title === "Notes CRUD API")!;
+    expect(crud.attempts).toBe(1);
+    expect(crud.status).toBe("done");
+    const log = orch.board.snapshot().log.map((l) => l.message);
+    expect(log.some((m) => m.includes("cut off for overspending"))).toBe(true);
+    expect(log.some((m) => /CFO \+4 to/.test(m))).toBe(true);
+    const api = orch.board.agent("eng-api-1");
+    expect(api.score!.overruns).toBeGreaterThanOrEqual(1);
+    expect(api.score!.recent).toContain(-2);
+    // The web engineer delivered everything first pass under budget.
+    expect(orch.board.agent("eng-web-1").standing).toBe("trusted");
+  }, 30_000);
+
+  it("batches related tickets and splits a rejected batch back into singles", async () => {
+    const orch = new Orchestrator(
+      new MockRunner({ stepMs: 0, rejectFirstReviewOf: ["Notes CRUD API"] }),
+      { workspaceDir: workspace(), autoApprove: "all", tickMs: 5, qaRounds: 0, floaters: 0 },
+    );
+    const project = await orch.run("A notes app");
+    expect(project.phase).toBe("shipped");
+    const log = orch.board.snapshot().log.map((l) => l.message);
+    const batchLine = log.find((m) => m.includes("(batched)"));
+    expect(batchLine).toBeDefined();
+    expect(log.some((m) => m.includes("split back into single tickets"))).toBe(true);
+    // After the split, each ticket was built and merged on its own.
+    const auth = orch.board.tickets.find((t) => t.title === "Auth API")!;
+    const crud = orch.board.tickets.find((t) => t.title === "Notes CRUD API")!;
+    expect(auth.status).toBe("done");
+    expect(crud.status).toBe("done");
+    expect(crud.noBatch).toBe(true);
+    expect(orch.board.tickets.every((t) => t.status === "done")).toBe(true);
+  }, 30_000);
+
+  it("traces a QA bug to the engineer who merged the files", async () => {
+    const orch = new Orchestrator(new MockRunner({ stepMs: 0, qaFindsBugOnce: true }), {
+      workspaceDir: workspace(), autoApprove: "all", tickMs: 5,
+    });
+    await orch.run("A notes app");
+    const notesPage = orch.board.tickets.find((t) => t.title === "Notes list page")!;
+    const builder = orch.board.agent(notesPage.assignee!);
+    expect(builder.score!.bugs).toBe(1);
+    expect(orch.board.snapshot().log.some((l) => l.message.includes(`traced "Empty notes list shows a blank page" to ${notesPage.id}`))).toBe(true);
   }, 30_000);
 });

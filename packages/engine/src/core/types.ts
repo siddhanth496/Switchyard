@@ -49,9 +49,43 @@ export interface Ticket {
   escalated?: boolean;
   /** "bug" for tickets QA filed. */
   kind?: "feature" | "bug";
+  /** Size the task creator gave it; the CFO budgets by size. */
+  size?: TicketSize;
+  /** What the CFO allotted for building it, in USD. */
+  budgetUsd?: number;
+  /** Spent on build attempts so far (reviews excluded), in USD. */
+  buildSpendUsd?: number;
+  /** Ticket ids built together in one batch, this one included. */
+  batchWith?: string[];
+  /** Set after a batch was rejected, so the retry runs on its own. */
+  noBatch?: boolean;
   costUsd: number;
   createdAt: number;
   updatedAt: number;
+}
+
+export type TicketSize = "S" | "M" | "L";
+
+/** Budget units per size: an L ticket gets four times an S ticket's budget. */
+export const SIZE_UNITS: Record<TicketSize, number> = { S: 1, M: 2, L: 4 };
+
+/**
+ * How the CFO ranks an engineer, from its last few scored events.
+ * trusted: first pick of big tickets, more budget headroom.
+ * watch: small tickets, tight cut-off, a warning in its prompt.
+ * benched: no new tickets until a couple more merge elsewhere.
+ */
+export type Standing = "trusted" | "normal" | "watch" | "benched";
+
+export interface Scorecard {
+  delivered: number;
+  firstPass: number;
+  onBudget: number;
+  reworks: number;
+  overruns: number;
+  bugs: number;
+  /** Points from the most recent events (a rolling window, so penalties wear off). */
+  recent: number[];
 }
 
 export interface Area {
@@ -82,6 +116,11 @@ export interface Agent {
   /** Last line of activity, for the live agent cards. */
   activity?: string;
   spentUsd: number;
+  /** Engineers only: the CFO's scorecard and resulting standing. */
+  score?: Scorecard;
+  standing?: Standing;
+  /** While benched: the merge count at which the bench lifts. */
+  benchedUntilMerges?: number;
 }
 
 export interface Lease {

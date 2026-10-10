@@ -16,6 +16,8 @@ export interface AgentTask {
   maxTurns?: number;
   /** A last-chance attempt after repeated failures; runners may use a stronger model. */
   escalated?: boolean;
+  /** Hard spend cap for this task; the run is cut off past it. */
+  budgetUsd?: number;
   /** Structured context, so test and mock runners don't need to parse prompts. */
   context: {
     idea?: string;
@@ -23,6 +25,8 @@ export interface AgentTask {
     feedback?: string;
     areas?: Area[];
     ticket?: Ticket;
+    /** All tickets in a batch, the primary first. */
+    batch?: Ticket[];
     diff?: string;
     /** QA round, starting at 1. */
     qaRound?: number;
@@ -35,6 +39,8 @@ export interface AgentResult {
   text: string;
   costUsd: number;
   error?: string;
+  /** True if the run was cut off for hitting its spend cap. */
+  overBudget?: boolean;
 }
 
 export type ActivityListener = (line: string) => void;

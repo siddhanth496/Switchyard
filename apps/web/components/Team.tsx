@@ -2,12 +2,19 @@
 
 import type { Agent, Area } from "@agentco/engine";
 
+const STANDING: Record<string, string> = { trusted: "Trusted", watch: "On watch", benched: "Benched" };
+
 function AgentCard({ agent }: { agent: Agent }) {
   const working = agent.status === "working";
+  const card = agent.score;
+  const standing = agent.standing && agent.standing !== "normal" ? agent.standing : null;
   return (
     <div className={`agent ${working ? "working" : ""}`}>
       <div className="row">
-        <span className="name">{agent.name}</span>
+        <span className="name">
+          {agent.name}
+          {standing && <span className={`standing s-${standing}`}>{STANDING[standing]}</span>}
+        </span>
         {agent.currentTicket ? (
           <span className="ticket-tag">{agent.currentTicket}</span>
         ) : (
@@ -17,6 +24,14 @@ function AgentCard({ agent }: { agent: Agent }) {
       <div className="doing" title={agent.activity}>
         {agent.activity || "Waiting for work"}
       </div>
+      {card && card.delivered + card.reworks > 0 && (
+        <div className="scoreline" title="The CFO's scorecard for this engineer">
+          {card.delivered} delivered, {card.firstPass} first pass
+          {card.reworks > 0 && <>, {card.reworks} sent back</>}
+          {card.overruns > 0 && <>, {card.overruns} over budget</>}
+          {card.bugs > 0 && <>, {card.bugs} bug{card.bugs > 1 ? "s" : ""}</>}
+        </div>
+      )}
       {agent.spentUsd > 0 && <div className="meta">${agent.spentUsd.toFixed(2)} spent</div>}
     </div>
   );

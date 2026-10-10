@@ -62,6 +62,15 @@ function TicketCard({
       {ticket.status === "ready" && waitingOn.length > 0 && (
         <div className="line wait">Waiting on {waitingOn.join(", ")}</div>
       )}
+      {ticket.batchWith && ticket.batchWith.length > 1 && ["in_progress", "review"].includes(ticket.status) && (
+        <div className="line batch">Batched with {ticket.batchWith.filter((id) => id !== ticket.id).join(", ")}</div>
+      )}
+      {ticket.budgetUsd !== undefined && ticket.budgetUsd > 0 && (
+        <div className={`line budget${(ticket.buildSpendUsd ?? 0) > ticket.budgetUsd ? " over" : ""}`}>
+          {ticket.size && <span className="size">{ticket.size}</span>}
+          ${(ticket.buildSpendUsd ?? 0).toFixed(2)} of ${ticket.budgetUsd.toFixed(2)}
+        </div>
+      )}
       {ticket.escalated && ticket.status !== "done" && <div className="line escalated">Escalated to the tech lead</div>}
       {skippedDeps.length > 0 && ticket.status !== "done" && (
         <div className="line wait">Building without {skippedDeps.join(", ")} (skipped)</div>

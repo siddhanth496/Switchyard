@@ -42,7 +42,7 @@ export class ClaudeRunner implements AgentRunner {
           systemPrompt: task.systemPrompt,
           model: task.escalated ? (this.options.escalationModel ?? this.options.model) : this.options.model,
           maxTurns: task.maxTurns ?? (task.canWrite ? 40 : 12),
-          maxBudgetUsd: this.options.maxBudgetUsdPerTask,
+          maxBudgetUsd: capOf(task.budgetUsd, this.options.maxBudgetUsdPerTask),
           tools,
           allowedTools: tools,
           permissionMode: "dontAsk",
@@ -68,7 +68,8 @@ export class ClaudeRunner implements AgentRunner {
           } else {
             const detail =
               message.subtype === "success" ? message.result : message.errors?.join("; ") || message.subtype;
-            return { ok: false, text, costUsd, error: detail };
+            const overBudget = message.subtype === "error_max_budget_usd";
+            return { ok: false, text, costUsd, error: overBudget ? "cut off at its spend cap" : detail, overBudget };
           }
         }
       }
@@ -102,6 +103,13 @@ export function envWithApiKey(apiKey: string, base: NodeJS.ProcessEnv = process.
   }
   env.ANTHROPIC_API_KEY = apiKey;
   return env;
+}
+
+/** The tighter of two optional caps. */
+function capOf(a?: number, b?: number): number | undefined {
+  if (a === undefined) return b;
+  if (b === undefined) return a;
+  return Math.min(a, b);
 }
 
 function firstLine(s: string): string {

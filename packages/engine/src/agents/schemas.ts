@@ -29,6 +29,7 @@ export const TicketPlanSchema = z.object({
         files: z.array(z.string()).min(1),
         dependsOn: z.array(z.string()).default([]),
         priority: z.number().int().default(1),
+        size: z.enum(["S", "M", "L"]).default("M"),
       }),
     )
     .min(1),

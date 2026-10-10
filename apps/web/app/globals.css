@@ -814,6 +814,187 @@ h3 {
   font-size: 15px;
 }
 
+/* ---- CEO controls ------------------------------------------------------ */
+
+.btn-stop {
+  color: var(--fail);
+  border-color: color-mix(in srgb, var(--fail) 40%, var(--line));
+}
+.btn-stop:hover {
+  border-color: var(--fail);
+}
+.btn-danger {
+  background: var(--fail);
+  border-color: var(--fail);
+  color: #fff;
+}
+.controls {
+  margin: 14px 28px 0;
+  display: grid;
+  gap: 10px;
+}
+.controls .held {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: var(--review-soft);
+  color: var(--review);
+  font-size: 14px;
+}
+.controls .change {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.controls .change label {
+  font-size: 14px;
+  font-weight: 600;
+}
+.controls .change input {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  min-width: 0;
+}
+.controls .change p {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 13px;
+}
+.controls .sent {
+  color: var(--build);
+}
+.controls .error,
+.ticket-actions .error,
+.models-editor .error {
+  color: var(--fail);
+  font-size: 13px;
+  margin: 0;
+}
+.ticket-more {
+  margin-top: 8px;
+  border: 0;
+  background: none;
+  padding: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  cursor: pointer;
+}
+.ticket-more:hover {
+  text-decoration: underline;
+}
+.ticket-actions {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 6px;
+}
+.ticket-actions textarea {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+  font-size: 13px;
+  min-height: 56px;
+  resize: vertical;
+}
+.ticket-actions .row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.ticket-actions .btn {
+  padding: 4px 8px;
+  font-size: 12px;
+}
+.ticket-actions .hint {
+  margin: 0;
+  font-size: 11px;
+  color: var(--faint);
+}
+.ticket .ceo-notes {
+  margin: 6px 0 0;
+  padding: 6px 8px 6px 22px;
+  border-radius: 6px;
+  background: var(--accent-soft);
+  color: var(--accent-deep);
+  font-size: 12px;
+}
+.model-tag {
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+.models-editor {
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  font-size: 13px;
+}
+.models-editor summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.models-editor label {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.models-editor select {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 4px 6px;
+  background: var(--surface);
+}
+.models-editor .hint {
+  margin: 8px 0 0;
+  color: var(--faint);
+  font-size: 12px;
+}
+.role-models summary {
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+}
+.role-models > p {
+  margin: 6px 0 10px;
+}
+.role-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+@media (max-width: 640px) {
+  .role-grid {
+    grid-template-columns: 1fr;
+  }
+  .controls {
+    margin-left: 16px;
+    margin-right: 16px;
+  }
+  .controls .change {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* ---- responsive ------------------------------------------------------- */
 
 @media (max-width: 1560px) {

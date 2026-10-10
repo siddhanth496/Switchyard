@@ -72,4 +72,6 @@ export type ActivityListener = (line: string) => void;
 export interface AgentRunner {
   readonly name: string;
   run(task: AgentTask, onActivity: ActivityListener, signal?: AbortSignal): Promise<AgentResult>;
+  /** Change the model per role for tasks that start from now on. */
+  setModels?(models: Partial<Record<Role, string>>, escalationModel?: string): void;
 }

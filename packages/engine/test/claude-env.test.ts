@@ -21,3 +21,16 @@ describe("envWithApiKey", () => {
     }
   });
 });
+
+describe("models per role", () => {
+  it("runs each role on its own model, and escalations on the escalation model", async () => {
+    const { ClaudeRunner } = await import("../src/agents/claude.js");
+    const r = new ClaudeRunner({ model: "claude-haiku-5-5", escalationModel: "claude-sonnet-5-5", models: { designer: "claude-opus-5-5" } });
+    expect(r.modelFor({ role: "designer", escalated: false })).toBe("claude-opus-5-5");
+    expect(r.modelFor({ role: "engineer", escalated: false })).toBe("claude-haiku-5-5");
+    expect(r.modelFor({ role: "tech_lead", escalated: true })).toBe("claude-sonnet-5-5");
+    r.setModels({ engineer: "claude-sonnet-5-5" });
+    expect(r.modelFor({ role: "engineer", escalated: false })).toBe("claude-sonnet-5-5");
+    expect(r.modelFor({ role: "designer", escalated: false })).toBe("claude-haiku-5-5");
+  });
+});

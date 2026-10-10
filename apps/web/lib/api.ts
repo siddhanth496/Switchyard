@@ -30,8 +30,16 @@ export interface StartOptions {
   floaters: number;
   budgetUsd: number;
   model?: string;
+  /** Model per role; roles left out use `model`. */
+  models?: Record<string, string>;
   marketing: boolean;
   design: boolean;
+}
+
+export interface ModelRole {
+  role: string;
+  label: string;
+  hint: string;
 }
 
 export interface ModelOption {
@@ -48,6 +56,7 @@ export interface KeyStatus {
 
 export interface ServerConfig extends KeyStatus {
   models: ModelOption[];
+  modelRoles: ModelRole[];
   defaultModel: string;
   defaultRunner: "mock" | "claude";
 }
@@ -63,4 +72,11 @@ export const api = {
   retry: (ticketId: string, guidance?: string) => post(`/api/tickets/${ticketId}/retry`, guidance ? { guidance } : {}),
   skip: (ticketId: string) => post(`/api/tickets/${ticketId}/skip`),
   stop: () => post("/api/stop"),
+  pause: () => post("/api/pause"),
+  resume: () => post("/api/resume"),
+  requestChange: (request: string) => post("/api/changes", { request }),
+  setModels: (models: Record<string, string>) => request<{ models: Record<string, string> }>("PUT", "/api/models", { models }),
+  prioritize: (ticketId: string) => post(`/api/tickets/${ticketId}/prioritize`),
+  note: (ticketId: string, note: string, redo = false) => post(`/api/tickets/${ticketId}/note`, { note, redo }),
+  cancel: (ticketId: string) => post(`/api/tickets/${ticketId}/cancel`),
 };

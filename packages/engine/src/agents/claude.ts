@@ -1,4 +1,5 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
+import type { Role } from "../core/types.js";
 import type { ActivityListener, AgentResult, AgentRunner, AgentTask } from "./runner.js";
 
 export interface ClaudeRunnerOptions {
@@ -10,6 +11,8 @@ export interface ClaudeRunnerOptions {
   apiKey?: string;
   /** Model for escalated attempts (after repeated failures). Defaults to `model`. */
   escalationModel?: string;
+  /** Model per role; roles not listed use `model`. */
+  models?: Partial<Record<Role, string>>;
 }
 
 const READ_TOOLS = ["Read", "Glob", "Grep"];
@@ -27,6 +30,17 @@ export class ClaudeRunner implements AgentRunner {
 
   constructor(private readonly options: ClaudeRunnerOptions = {}) {}
 
+  setModels(models: Partial<Record<Role, string>>, escalationModel?: string): void {
+    this.options.models = { ...models };
+    if (escalationModel) this.options.escalationModel = escalationModel;
+  }
+
+  /** The model a task runs on: escalations get the stronger model, otherwise its role's. */
+  modelFor(task: Pick<AgentTask, "role" | "escalated">): string | undefined {
+    const own = this.options.models?.[task.role] ?? this.options.model;
+    return task.escalated ? (this.options.escalationModel ?? own) : own;
+  }
+
   async run(task: AgentTask, onActivity: ActivityListener, signal?: AbortSignal): Promise<AgentResult> {
     const tools = task.canWrite ? WRITE_TOOLS : READ_TOOLS;
     const abortController = new AbortController();
@@ -40,7 +54,7 @@ export class ClaudeRunner implements AgentRunner {
         options: {
           cwd: task.cwd,
           systemPrompt: task.systemPrompt,
-          model: task.escalated ? (this.options.escalationModel ?? this.options.model) : this.options.model,
+          model: this.modelFor(task),
           maxTurns: task.maxTurns ?? (task.canWrite ? 40 : 12),
           maxBudgetUsd: capOf(task.budgetUsd, this.options.maxBudgetUsdPerTask),
           tools,

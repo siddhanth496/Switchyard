@@ -285,7 +285,9 @@ ${t.acceptance.map((a) => `- ${a}`).join("\n") || "- (none listed)"}
 
 Files you own for this ticket:
 ${t.files.map((f) => `- ${f}`).join("\n")}
-${t.feedback ? `\nThe reviewer requested changes on the last attempt:\n${t.feedback}\n` : ""}`;
+${t.feedback ? `\nThe reviewer requested changes on the last attempt:\n${t.feedback}\n` : ""}${
+  t.ceoNotes?.length ? `\nNotes from the CEO (these override the description where they differ):\n${t.ceoNotes.map((n) => `- ${n}`).join("\n")}\n` : ""
+}`;
 }
 
 export function buildPrompt(ticket: Ticket, ownerNotes: string, prd: string, extras: BuildExtras = {}): string {

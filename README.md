@@ -31,6 +31,20 @@ pnpm web           # UI on http://localhost:3000
 
 Pick **Demo agents** in the UI to watch the flow for free, or **Claude agents** for real work. To try the failure flow with demo agents, start the API with `MOCK_FAIL="App shell" pnpm api`: that ticket always fails.
 
+### Your controls during the build
+
+You aren't limited to the decision cards:
+
+- **Pause / Resume** (header): running tickets finish, nothing new starts, and QA and the release wait, until you resume.
+- **Stop** (header): stops at once. Running agents are aborted, waiting decision cards close, and tickets that were mid-build go back on the board with no attempt or penalty counted. Pick the product up later with *Continue a product*.
+- **Ask for a change** (the bar above the board): type a change at any point in the build. The task creator files tickets for it straight away, and they're built and tested before the release. While the release card is waiting, a change request holds the release with that feedback.
+- **Steer a ticket** (the *Steer* link on any waiting or running ticket):
+  - *Add a note*: every engineer who works on the ticket sees it, and it overrides the description where they differ.
+  - *Redo with note*: stops the running attempt and starts again with your note. It doesn't count against the engineer.
+  - *Do next*: moves a waiting ticket to the front of the queue.
+  - *Cancel ticket*: drops it, and anything that depends on it goes ahead without it.
+- **Models**: with Claude agents, pick a model per role on the start screen (PM, marketing, designer, tech lead, task creator, engineers, QA), or switch them during the run from *Models* at the top of the team panel. The switch takes effect on each agent's next task. Escalated tickets run one tier above the engineers' model, and never below the tech lead's.
+
 ### Marketing and design
 
 Both teams are on by default; untick them on the start screen (or pass `--no-marketing` / `--no-design` to the CLI) to skip them.
@@ -120,12 +134,18 @@ apps/web/              Next.js dashboard
 | GET | `/api/config` | key status (last 4 only), models |
 | PUT | `/api/config/key` | `{ key }` |
 | DELETE | `/api/config/key` | |
-| POST | `/api/projects` | `{ idea, continueFrom?, runner?, engineersPerArea?, floaters?, budgetUsd?, model?, marketing?, design? }` |
+| POST | `/api/projects` | `{ idea, continueFrom?, runner?, engineersPerArea?, floaters?, budgetUsd?, model?, models?, marketing?, design? }` |
 | POST | `/api/gates/:id/approve` | `{ feedback? }` |
 | POST | `/api/gates/:id/reject` | `{ feedback }` |
 | POST | `/api/tickets/:id/retry` | `{ guidance? }` |
 | POST | `/api/tickets/:id/skip` | |
 | POST | `/api/stop` | |
+| POST | `/api/pause` / `/api/resume` | |
+| POST | `/api/changes` | `{ request }` |
+| PUT | `/api/models` | `{ models: { designer: "claude-opus-5-5", ... } }` |
+| POST | `/api/tickets/:id/note` | `{ note, redo? }` |
+| POST | `/api/tickets/:id/prioritize` | |
+| POST | `/api/tickets/:id/cancel` | |
 
 ## What's next
 

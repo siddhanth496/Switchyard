@@ -16,6 +16,7 @@ import {
   ProjectRepo,
   type AgentRunner,
   type BoardEvent,
+  type Role,
 } from "@agentco/engine";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -41,6 +42,38 @@ const MODELS = [
   { id: "claude-opus-5-5", label: "Opus 5.5", hint: "Most capable. Costs the most." },
 ] as const;
 const DEFAULT_MODEL = process.env.MODEL ?? "claude-haiku-5-5";
+
+/** Roles that run on a model, in the order the UI lists them. The CFO and dispatcher are plain code. */
+const MODEL_ROLES = ["pm", "marketing", "designer", "tech_lead", "task_creator", "engineer", "qa"] as const satisfies readonly Role[];
+const ModelsSchema = z
+  .record(z.enum(MODEL_ROLES), z.string())
+  .superRefine((m, ctx) => {
+    for (const [role, id] of Object.entries(m)) {
+      if (!MODELS.some((x) => x.id === id)) ctx.addIssue({ code: "custom", message: `Unknown model "${id}" for ${role}.` });
+    }
+  });
+type Models = Partial<Record<Role, string>>;
+const MODEL_ROLE_INFO: { role: (typeof MODEL_ROLES)[number]; label: string; hint: string }[] = [
+  { role: "pm", label: "PM", hint: "PRD and the design feasibility call" },
+  { role: "marketing", label: "Marketing", hint: "Name, logo, voice, launch copy" },
+  { role: "designer", label: "Designer", hint: "Design system, screens, screen reviews" },
+  { role: "tech_lead", label: "Tech lead", hint: "Architecture, code reviews, escalations" },
+  { role: "task_creator", label: "Task creator", hint: "Turns the plan into tickets" },
+  { role: "engineer", label: "Engineers", hint: "Build the tickets: most of the spend" },
+  { role: "qa", label: "QA", hint: "Tests the build" },
+];
+
+/** Every role on its model: the per-role choice, else the default. */
+function fillModels(model: string, models: Models = {}): Models {
+  return Object.fromEntries(MODEL_ROLES.map((r) => [r, models[r] ?? model]));
+}
+
+/** Escalated tickets (after repeated failures) run one tier above the engineers, and never below the tech lead. */
+function escalationFor(models: Models): string {
+  const tier = (id?: string) => Math.max(0, MODELS.findIndex((m) => m.id === id));
+  const t = Math.max(Math.min(tier(models.engineer) + 1, MODELS.length - 1), tier(models.tech_lead));
+  return MODELS[t]!.id;
+}
 
 /**
  * The API key lives only in this process's memory: never written to disk,
@@ -74,9 +107,11 @@ const StartSchema = z.object({
   marketing: z.boolean().optional(),
   /** The designer drafts the design and the PM checks feasibility (default on). */
   design: z.boolean().optional(),
+  /** Model per role; roles left out use `model`. */
+  models: ModelsSchema.optional(),
 });
 
-function makeRunner(kind: "mock" | "claude", model: string, budgetUsd: number): AgentRunner {
+function makeRunner(kind: "mock" | "claude", models: Models, budgetUsd: number): AgentRunner {
   if (kind === "mock") {
     // MOCK_FAIL="App shell" makes that demo ticket always fail, to try the failure flow.
     const failBuildsOf = process.env.MOCK_FAIL ? process.env.MOCK_FAIL.split(",") : [];
@@ -84,12 +119,10 @@ function makeRunner(kind: "mock" | "claude", model: string, budgetUsd: number): 
   }
   // Cap any single task at a quarter of the budget (min $0.50), so one
   // runaway agent can't blow through it before the CFO gate trips.
-  // Escalated attempts (after repeated failures) use the next model up.
-  const i = MODELS.findIndex((m) => m.id === model);
-  const escalationModel = MODELS[Math.min(i + 1, MODELS.length - 1)]?.id ?? model;
   return new ClaudeRunner({
-    model,
-    escalationModel,
+    model: models.engineer,
+    models,
+    escalationModel: escalationFor(models),
     apiKey: currentKey(),
     maxBudgetUsdPerTask: Math.max(0.5, budgetUsd / 4),
   });
@@ -106,7 +139,7 @@ app.onError((err, c) => {
 app.get("/api/health", (c) => c.json({ ok: true }));
 
 app.get("/api/config", (c) =>
-  c.json({ ...keyStatus(), models: MODELS, defaultModel: DEFAULT_MODEL, defaultRunner: DEFAULT_RUNNER }),
+  c.json({ ...keyStatus(), models: MODELS, modelRoles: MODEL_ROLE_INFO, defaultModel: DEFAULT_MODEL, defaultRunner: DEFAULT_RUNNER }),
 );
 
 app.put("/api/config/key", async (c) => {
@@ -187,7 +220,10 @@ app.get("/api/products", (c) => {
 
 app.post("/api/projects", async (c) => {
   const body = StartSchema.parse(await c.req.json());
-  if (orch?.isRunning) return c.json({ error: "A project is already running. Stop it first." }, 409);
+  if (orch?.isRunning) {
+    const stopping = board.project?.phase === "stopped";
+    return c.json({ error: stopping ? "The last project is still stopping. Try again in a few seconds." : "A project is already running. Stop it first." }, 409);
+  }
   const kind = body.runner ?? DEFAULT_RUNNER;
   if (kind === "claude" && !currentKey()) {
     return c.json({ error: "Add your Anthropic API key to use Claude agents." }, 400);
@@ -196,20 +232,6 @@ app.post("/api/projects", async (c) => {
   if (kind === "claude" && !MODELS.some((m) => m.id === model)) {
     return c.json({ error: `Unknown model "${model}".` }, 400);
   }
-  const budgetUsd = body.budgetUsd ?? 20;
-  runnerName = kind === "claude" ? `claude (${model})` : "mock";
-  orch = new Orchestrator(
-    makeRunner(kind, model, budgetUsd),
-    {
-      workspaceDir: WORKSPACE,
-      engineersPerArea: body.engineersPerArea ?? 1,
-      floaters: body.floaters ?? 1,
-      budgetUsd,
-      marketing: body.marketing ?? true,
-      design: body.design ?? true,
-    },
-    board,
-  );
   let existingDir: string | undefined;
   if (body.continueFrom) {
     existingDir = resolve(body.continueFrom);
@@ -217,6 +239,22 @@ app.post("/api/projects", async (c) => {
       return c.json({ error: "That product isn't in the workspace." }, 400);
     }
   }
+  const models = fillModels(model, body.models);
+  const budgetUsd = body.budgetUsd ?? 20;
+  runnerName = kind === "claude" ? "claude" : "mock";
+  orch = new Orchestrator(
+    makeRunner(kind, models, budgetUsd),
+    {
+      workspaceDir: WORKSPACE,
+      engineersPerArea: body.engineersPerArea ?? 1,
+      floaters: body.floaters ?? 1,
+      budgetUsd,
+      marketing: body.marketing ?? true,
+      design: body.design ?? true,
+      ...(kind === "claude" ? { models } : {}),
+    },
+    board,
+  );
   const project = orch.start(body.idea, body.name, { existingDir });
   return c.json({ project, runner: runnerName }, 201);
 });
@@ -246,6 +284,46 @@ app.post("/api/tickets/:id/retry", async (c) => {
 });
 
 app.post("/api/tickets/:id/skip", (c) => c.json(requireOrch().skip(c.req.param("id"))));
+
+// ---- CEO controls during the build ----------------------------------------
+
+app.post("/api/pause", (c) => {
+  requireOrch().pause();
+  return c.json({ ok: true });
+});
+
+app.post("/api/resume", (c) => {
+  requireOrch().resume();
+  return c.json({ ok: true });
+});
+
+app.post("/api/changes", async (c) => {
+  const { request } = z.object({ request: z.string().trim().min(3, "Say what should change.") }).parse(await c.req.json());
+  const o = requireOrch();
+  // Answer at once; the task creator files the tickets in the background.
+  o.requestChange(request).catch((err: Error) => board.log("warn", `Couldn't file the change: ${err.message}`));
+  return c.json({ ok: true }, 202);
+});
+
+app.put("/api/models", async (c) => {
+  const { models } = z.object({ models: ModelsSchema }).parse(await c.req.json());
+  if (runnerName !== "claude") return c.json({ error: "Demo agents don't use models." }, 400);
+  const all = fillModels(DEFAULT_MODEL, { ...board.project?.models, ...models });
+  requireOrch().setModels(all, escalationFor(all));
+  return c.json({ models: all });
+});
+
+app.post("/api/tickets/:id/prioritize", (c) => c.json(requireOrch().prioritize(c.req.param("id"))));
+
+app.post("/api/tickets/:id/note", async (c) => {
+  const { note, redo } = z
+    .object({ note: z.string().trim().default(""), redo: z.boolean().default(false) })
+    .parse(await c.req.json().catch(() => ({})));
+  if (!note && !redo) return c.json({ error: "Write a note first." }, 400);
+  return c.json(requireOrch().addNote(c.req.param("id"), note, { redo }));
+});
+
+app.post("/api/tickets/:id/cancel", (c) => c.json(requireOrch().cancel(c.req.param("id"))));
 
 app.post("/api/stop", (c) => {
   requireOrch().stop();

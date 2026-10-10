@@ -417,6 +417,138 @@ describe("changes after the build", () => {
   }, 40_000);
 });
 
+describe("stop", () => {
+  it("stops mid-build at once: shows stopped, aborts agents, puts tickets back without counting attempts", async () => {
+    const orch = new Orchestrator(new MockRunner({ stepMs: 30 }), { workspaceDir: workspace(), autoApprove: "all", tickMs: 5 });
+    orch.start("A notes app");
+    await waitFor(() => (orch.board.tickets.some((t) => t.status === "in_progress") ? true : undefined));
+    orch.stop();
+    expect(orch.board.project!.phase).toBe("stopped");
+    await orch.whenIdle();
+    expect(orch.isRunning).toBe(false);
+    expect(orch.board.project!.phase).toBe("stopped");
+    expect(orch.board.tickets.every((t) => t.status === "ready" && t.attempts === 0 && !t.assignee)).toBe(true);
+    expect(orch.board.leases).toHaveLength(0);
+    expect(orch.board.agents.some((a) => a.status === "working")).toBe(false);
+    expect(orch.board.agents.every((a) => (a.score?.reworks ?? 0) === 0)).toBe(true);
+    expect(orch.board.snapshot().log.at(-1)!.message).toBe("Stopped by the CEO");
+    // Nothing starts afterwards.
+    await new Promise((r) => setTimeout(r, 100));
+    expect(orch.board.tickets.some((t) => t.status === "in_progress")).toBe(false);
+  }, 20_000);
+
+  it("stops while waiting on a decision and closes the card", async () => {
+    const orch = new Orchestrator(new MockRunner({ stepMs: 0 }), { workspaceDir: workspace(), tickMs: 5 });
+    orch.start("A notes app");
+    const gate = await waitFor(() => orch.board.gates.find((g) => g.kind === "prd" && g.status === "pending"));
+    orch.stop();
+    await orch.whenIdle();
+    expect(orch.board.project!.phase).toBe("stopped");
+    expect(orch.board.gates.find((g) => g.id === gate.id)!.status).toBe("rejected");
+    expect(orch.board.gates.some((g) => g.status === "pending")).toBe(false);
+  }, 20_000);
+});
+
+describe("stop", () => {
+  it("stops mid-build at once: shows stopped, aborts agents, puts tickets back without counting attempts", async () => {
+    const orch = new Orchestrator(new MockRunner({ stepMs: 30 }), { workspaceDir: workspace(), autoApprove: "all", tickMs: 5 });
+    orch.start("A notes app");
+    await waitFor(() => (orch.board.tickets.some((t) => t.status === "in_progress") ? true : undefined));
+    orch.stop();
+    expect(orch.board.project!.phase).toBe("stopped");
+    await orch.whenIdle();
+    expect(orch.isRunning).toBe(false);
+    expect(orch.board.project!.phase).toBe("stopped");
+    expect(orch.board.tickets.every((t) => t.status === "ready" && t.attempts === 0 && !t.assignee)).toBe(true);
+    expect(orch.board.leases).toHaveLength(0);
+    expect(orch.board.agents.some((a) => a.status === "working")).toBe(false);
+    expect(orch.board.agents.every((a) => (a.score?.reworks ?? 0) === 0)).toBe(true);
+    expect(orch.board.snapshot().log.at(-1)!.message).toBe("Stopped by the CEO");
+    await new Promise((r) => setTimeout(r, 100));
+    expect(orch.board.tickets.some((t) => t.status === "in_progress")).toBe(false);
+  }, 20_000);
+
+  it("stops while waiting on a decision and closes the card", async () => {
+    const orch = new Orchestrator(new MockRunner({ stepMs: 0 }), { workspaceDir: workspace(), tickMs: 5 });
+    orch.start("A notes app");
+    const gate = await waitFor(() => orch.board.gates.find((g) => g.kind === "prd" && g.status === "pending"));
+    orch.stop();
+    await orch.whenIdle();
+    expect(orch.board.project!.phase).toBe("stopped");
+    expect(orch.board.gates.find((g) => g.id === gate.id)!.status).toBe("rejected");
+    expect(orch.board.gates.some((g) => g.status === "pending")).toBe(false);
+  }, 20_000);
+});
+
+describe("CEO controls during the build", () => {
+  it("pauses: running tickets finish, nothing new starts until resumed", async () => {
+    const orch = new Orchestrator(new MockRunner({ stepMs: 20 }), { workspaceDir: workspace(), autoApprove: "all", tickMs: 5, qaRounds: 0 });
+    orch.start("A notes app");
+    await waitFor(() => (orch.board.tickets.some((t) => t.status === "in_progress") ? true : undefined));
+    orch.pause();
+    expect(orch.board.project!.held).toBe(true);
+    await waitFor(() => (orch.board.tickets.every((t) => t.status !== "in_progress" && t.status !== "review") ? true : undefined));
+    const done = orch.board.tickets.filter((t) => t.status === "done").length;
+    await new Promise((r) => setTimeout(r, 300));
+    expect(orch.board.tickets.filter((t) => t.status === "done").length).toBe(done);
+    expect(orch.board.tickets.some((t) => t.status === "in_progress")).toBe(false);
+    orch.resume();
+    await orch.whenIdle();
+    expect(orch.board.project!.phase).toBe("shipped");
+  }, 30_000);
+
+  it("files a change the CEO asks for mid-build and builds it before release", async () => {
+    const orch = new Orchestrator(new MockRunner({ stepMs: 10 }), { workspaceDir: workspace(), autoApprove: "all", tickMs: 5, qaRounds: 0 });
+    orch.start("A notes app");
+    await waitFor(() => (orch.board.tickets.some((t) => t.status === "in_progress") ? true : undefined));
+    expect(await orch.requestChange("Add a dark mode toggle")).toBe(1);
+    await orch.whenIdle();
+    expect(orch.board.project!.phase).toBe("shipped");
+    const change = orch.board.tickets.find((t) => t.kind === "change")!;
+    expect(change.title).toContain("Add a dark mode toggle");
+    expect(change.status).toBe("done");
+  }, 30_000);
+
+  it("moves a ticket up, and restarts a running ticket with the CEO's note at no cost to the engineer", async () => {
+    const tasks: AgentTask[] = [];
+    const mock = new MockRunner({ stepMs: 30 });
+    const runner: AgentRunner = { name: "spy", run: (t, on, sig) => (tasks.push(t), mock.run(t, on, sig)) };
+    const orch = new Orchestrator(runner, { workspaceDir: workspace(), autoApprove: "all", tickMs: 5, qaRounds: 0 });
+    orch.board.on(() => {
+      if (orch.board.tickets.length === 6 && orch.board.project?.held === undefined) orch.pause();
+    });
+    orch.start("A notes app");
+    await waitFor(() => (orch.board.project?.held ? true : undefined));
+    expect(orch.prioritize("T-5").priority).toBeLessThan(0);
+    orch.resume();
+
+    const shell = await waitFor(() => orch.board.tickets.find((t) => t.title === "App shell and styles" && t.status === "in_progress"));
+    orch.addNote(shell.id, "Use a sticky header", { redo: true });
+    await orch.whenIdle();
+    expect(orch.board.project!.phase).toBe("shipped");
+    const after = orch.board.ticket(shell.id);
+    expect(after.status).toBe("done");
+    expect(after.attempts).toBe(0);
+    expect(after.ceoNotes).toEqual(["Use a sticky header"]);
+    const builds = tasks.filter((t) => t.kind === "build" && t.context.ticket?.id === shell.id);
+    expect(builds.length).toBe(2);
+    expect(builds[1]!.prompt).toContain("Notes from the CEO");
+    expect(builds[1]!.prompt).toContain("Use a sticky header");
+    expect(orch.board.agent(after.assignee!).score!.reworks).toBe(0);
+  }, 30_000);
+
+  it("cancels a running ticket; its dependents go ahead without it", async () => {
+    const orch = new Orchestrator(new MockRunner({ stepMs: 30 }), { workspaceDir: workspace(), autoApprove: "all", tickMs: 5, qaRounds: 0 });
+    orch.start("A notes app");
+    const shell = await waitFor(() => orch.board.tickets.find((t) => t.title === "App shell and styles" && t.status === "in_progress"));
+    orch.cancel(shell.id);
+    await orch.whenIdle();
+    expect(orch.board.project!.phase).toBe("shipped");
+    expect(orch.board.ticket(shell.id).status).toBe("skipped");
+    expect(orch.board.tickets.find((t) => t.title === "Login page")!.status).toBe("done");
+  }, 30_000);
+});
+
 describe("marketing and design", () => {
   it("brands the product, designs it, has the PM check feasibility, and writes launch copy", async () => {
     const orch = new Orchestrator(new MockRunner({ stepMs: 0, pmPushesBackDesign: "once" }), {

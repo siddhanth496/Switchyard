@@ -3,7 +3,7 @@ import { basename, extname, join, resolve } from "node:path";
 import { Board } from "../core/board.js";
 import { planDispatch, type Assignment } from "../core/dispatcher.js";
 import { anyOverlap, isProtected, overlaps, resolveArea } from "../core/paths.js";
-import type { Agent, Area, Gate, GateImage, GateKind, Project, Scorecard, Ticket, TicketSize } from "../core/types.js";
+import type { Agent, Area, Gate, GateImage, GateKind, Project, Role, Scorecard, Ticket, TicketSize } from "../core/types.js";
 import {
   BENCH_MERGES,
   HEADROOM,
@@ -81,6 +81,8 @@ export interface OrchestratorConfig {
   design?: boolean;
   /** Designer ↔ PM rounds before the PM makes the final call on scope. */
   designRounds?: number;
+  /** Model per role, shown on the board (the runner does the switching). */
+  models?: Partial<Record<Role, string>>;
 }
 
 /** Starting .gitignore for every product repo: dependencies, builds, secrets and OS clutter. */
@@ -116,9 +118,14 @@ const IDS = {
  */
 export class Orchestrator {
   readonly board: Board;
-  private readonly cfg: Required<Omit<OrchestratorConfig, "autoApprove">> & {
+  private readonly cfg: Required<Omit<OrchestratorConfig, "autoApprove" | "models">> & {
     autoApprove: GateKind[] | "all";
+    models?: Partial<Record<Role, string>>;
   };
+  /** Per-ticket stop buttons, so the CEO can redo or cancel one ticket. */
+  private readonly ticketAborts = new Map<string, AbortController>();
+  /** Tickets the CEO interrupted: what to do with them when their run winds down. */
+  private readonly interrupted = new Map<string, "redo" | "cancel">();
   private repo: ProjectRepo | null = null;
   private prd = "";
   private architecture = "";
@@ -170,11 +177,13 @@ export class Orchestrator {
       marketing: config.marketing ?? true,
       design: config.design ?? true,
       designRounds: Math.max(1, config.designRounds ?? 2),
+      models: config.models,
     };
   }
 
+  /** True while anything is still running, including agents wrapping up after a stop. */
   get isRunning(): boolean {
-    return this.pipeline !== null;
+    return this.pipeline !== null || this.buildLoop !== null || this.running.size > 0;
   }
 
   get repoDir(): string | null {
@@ -240,10 +249,142 @@ export class Orchestrator {
     return this.board.gates.find((g) => g.kind === "ticket_failed" && g.ticketId === ticketId && g.status === "pending");
   }
 
-  /** Stop dispatching and abort running agents. */
+  /**
+   * Stop now: abort every running agent, start no new work, close the
+   * decisions waiting on the CEO, and show the project as stopped at once.
+   * Tickets that were mid-build go back to the board as they were, with no
+   * attempt or penalty counted.
+   */
   stop(): void {
+    const project = this.board.project;
+    if (this.abort.signal.aborted || !project || project.phase === "shipped") return;
     this.abort.abort();
+    for (const g of this.board.gates.filter((x) => x.status === "pending")) this.board.resolveGate(g.id, false, "Stopped");
+    this.gateWaiters.clear();
+    this.board.updateProject({ phase: "stopped" });
+    const busy = this.board.agents.filter((a) => a.status === "working").length;
+    this.board.log("warn", busy > 0 ? `Stopping: ${busy} agent(s) wrapping up` : "Stopped by the CEO");
     this.poke();
+    void this.whenIdle().then(() => {
+      for (const a of this.board.agents) {
+        if (a.status === "working") this.board.updateAgent(a.id, { status: "idle", currentTicket: undefined, activity: "Stopped" });
+      }
+      if (busy > 0) this.board.log("warn", "Stopped by the CEO");
+    });
+  }
+
+  // ---- CEO controls during the build ----------------------------------
+
+  /** Pause: running tickets finish, nothing new starts (QA and release wait too). */
+  pause(): void {
+    const p = this.requireActive();
+    if (p.held) return;
+    this.board.updateProject({ held: true });
+    this.board.log("warn", "CEO paused the build: running tickets finish, nothing new starts");
+  }
+
+  resume(): void {
+    const p = this.requireActive();
+    if (!p.held) return;
+    this.board.updateProject({ held: false });
+    this.board.log("info", "CEO resumed the build");
+    this.poke();
+  }
+
+  /**
+   * A change from the CEO in the middle of the work. During the build the
+   * task creator files change tickets at once; while the release card is
+   * waiting, it counts as holding the release with this feedback.
+   */
+  requestChange(request: string): Promise<number> {
+    // Checks throw at once, so a caller that doesn't wait still hears about them.
+    const text = request.trim();
+    if (!text) throw new Error("Say what should change");
+    this.requireActive();
+    const release = this.board.gates.find((g) => g.kind === "release" && g.status === "pending");
+    if (release) {
+      this.reject(release.id, text);
+      return Promise.resolve(0);
+    }
+    if (!this.buildLoop) throw new Error("You can request changes once the build has started; until then, use the decision cards");
+    this.board.log("info", `CEO requested a change: ${text}`);
+    return this.fileChangeTickets(text, { midBuild: true }).then((filed) => {
+      this.poke();
+      return filed;
+    });
+  }
+
+  /** Move a waiting ticket to the front of the queue. */
+  prioritize(ticketId: string): Ticket {
+    const t = this.board.ticket(ticketId);
+    if (!["ready", "backlog"].includes(t.status)) throw new Error(`${ticketId} is ${t.status}; only waiting tickets can be moved up`);
+    const top = Math.min(0, ...this.board.tickets.map((x) => x.priority));
+    this.board.updateTicket(ticketId, { priority: top - 1 });
+    this.board.log("info", `CEO moved ${ticketId} to the front of the queue`, { ticketId });
+    this.poke();
+    return this.board.ticket(ticketId);
+  }
+
+  /** A note every later attempt's engineer sees. With `redo`, the running attempt restarts with it. */
+  addNote(ticketId: string, note: string, opts: { redo?: boolean } = {}): Ticket {
+    const t = this.board.ticket(ticketId);
+    const text = note.trim();
+    if (text) this.board.updateTicket(ticketId, { ceoNotes: [...(t.ceoNotes ?? []), text] });
+    if (opts.redo && ["in_progress", "review"].includes(t.status)) {
+      this.interruptTicket(ticketId, "redo");
+      this.board.log("info", `CEO restarted ${ticketId}${text ? " with a note" : ""}`, { ticketId });
+    } else if (text) {
+      this.board.log("info", `CEO added a note to ${ticketId}`, { ticketId });
+    }
+    return this.board.ticket(ticketId);
+  }
+
+  /** Drop a ticket. Tickets that depend on it go ahead without it, as with a skip. */
+  cancel(ticketId: string): Ticket {
+    const t = this.board.ticket(ticketId);
+    if (["done", "skipped"].includes(t.status)) throw new Error(`${ticketId} is already ${t.status}`);
+    if (["in_progress", "review"].includes(t.status)) {
+      this.interruptTicket(ticketId, "cancel");
+    } else if (t.status === "failed") {
+      this.skip(ticketId);
+      return this.board.ticket(ticketId);
+    } else {
+      this.board.moveTicket(ticketId, "skipped", { escalated: false });
+    }
+    this.board.log("warn", `CEO cancelled ${ticketId}; tickets that depend on it go ahead without it`, { ticketId });
+    this.poke();
+    return this.board.ticket(ticketId);
+  }
+
+  /** Switch models for tasks that start from now on. */
+  setModels(models: Partial<Record<Role, string>>, escalationModel?: string): void {
+    this.runner.setModels?.(models, escalationModel);
+    this.board.updateProject({ models: { ...models } });
+    this.board.log("info", "CEO changed the agents' models; running tasks finish on their current model");
+  }
+
+  private requireActive(): Project {
+    const p = this.board.project;
+    if (!p || this.abort.signal.aborted || ["shipped", "stopped", "failed"].includes(p.phase)) {
+      throw new Error("Nothing is running");
+    }
+    return p;
+  }
+
+  /** Abort the run working on a ticket (its batch's run, if batched). */
+  private interruptTicket(ticketId: string, why: "redo" | "cancel"): void {
+    const t = this.board.ticket(ticketId);
+    const lead = t.batchWith?.find((id) => this.ticketAborts.has(id)) ?? ticketId;
+    this.interrupted.set(ticketId, why);
+    if (lead !== ticketId && !this.interrupted.has(lead)) this.interrupted.set(lead, "redo");
+    this.ticketAborts.get(lead)?.abort();
+  }
+
+  /** Resolves once the pipeline, the build loop and every running ticket have finished. */
+  async whenIdle(): Promise<void> {
+    while (this.pipeline || this.buildLoop || this.running.size > 0) {
+      await Promise.allSettled([this.pipeline, this.buildLoop, ...this.running.values()]);
+    }
   }
 
   // ---- pipeline --------------------------------------------------------
@@ -268,6 +409,7 @@ export class Orchestrator {
       budgetUsd: this.cfg.budgetUsd,
       spentUsd: 0,
       teams: { marketing: this.cfg.marketing, design: this.cfg.design },
+      ...(this.cfg.models ? { models: { ...this.cfg.models } } : {}),
       createdAt: Date.now(),
     };
     this.board.setProject(project);
@@ -399,12 +541,11 @@ export class Orchestrator {
       this.board.updateProject({ phase: "building" });
       await this.ensureBuildLoop();
     } catch (err) {
-      if (this.abort.signal.aborted) {
-        this.board.log("warn", "Stopped by the CEO");
-      } else {
+      // A stop already set the phase and logged it.
+      if (!this.abort.signal.aborted) {
         this.board.log("error", `Pipeline failed: ${(err as Error).message}`);
+        this.board.updateProject({ phase: "failed" });
       }
-      this.board.updateProject({ phase: "failed" });
     }
   }
 
@@ -729,14 +870,21 @@ is done: build with this brand.`;
       for (;;) {
         const outcome = await this.dispatchUntilDone();
         if (outcome !== "done") return;
+        if (!(await this.untilResumed())) return;
+        if (this.openTickets() > 0) continue; // the CEO added work meanwhile
         if (this.qaRound >= this.cfg.qaRounds) break;
         // QA tests that it works; the designer looks at the running screens.
         const filed = await this.runQa();
         if (this.abort.signal.aborted) return;
         const design = await this.runDesignReview();
         if (this.abort.signal.aborted) return;
-        if (filed + design === 0) break;
+        if (filed + design === 0 && this.openTickets() === 0) break;
         this.board.updateProject({ phase: "building" });
+      }
+      if (!(await this.untilResumed())) return;
+      if (this.openTickets() > 0) {
+        this.board.updateProject({ phase: "building" });
+        continue;
       }
       // A held release comes back as change tickets; build, test and ask again.
       const next = await this.release();
@@ -745,10 +893,23 @@ is done: build with this brand.`;
     }
   }
 
-  /** Turn the CEO's feedback on a held release into change tickets. Returns how many. */
-  private async fileChangeTickets(feedback: string): Promise<number> {
+  private openTickets(): number {
+    return this.board.tickets.filter((t) => !["done", "skipped"].includes(t.status)).length;
+  }
+
+  /** Wait while the CEO has the build paused. False if stopped meanwhile. */
+  private async untilResumed(): Promise<boolean> {
+    while (this.board.project?.held && !this.abort.signal.aborted) await this.sleepUntilWoken();
+    return !this.abort.signal.aborted;
+  }
+
+  /**
+   * Turn the CEO's feedback into change tickets. Returns how many. Mid-build
+   * the board keeps running while the task creator works.
+   */
+  private async fileChangeTickets(feedback: string, opts: { midBuild?: boolean } = {}): Promise<number> {
     const repo = this.repo!;
-    this.board.updateProject({ phase: "ticketing" });
+    if (!opts.midBuild) this.board.updateProject({ phase: "ticketing" });
     try {
       const areas = [...this.board.areas];
       const { value: changePlan } = await this.runForJson(TicketPlanSchema, IDS.taskCreator, {
@@ -784,7 +945,7 @@ is done: build with this brand.`;
       const open = this.board.tickets.filter((t) => !["done", "skipped"].includes(t.status));
       if (open.length === 0 && this.running.size === 0) break;
 
-      if (project.phase === "building") {
+      if (project.phase === "building" && !project.held) {
         const plan = planDispatch(
           { tickets: this.board.tickets, areas: this.board.areas, agents: this.board.agents, leases: this.board.leases },
           { lendThreshold: this.cfg.lendThreshold, maxBatch: this.cfg.maxBatch },
@@ -1134,16 +1295,20 @@ ${log.slice(0, 15).map((l) => `- ${l}`).join("\n")}`;
       `${a.batch.join(" + ")} → ${this.board.agent(a.agentId).name}${a.lent ? ` (lent to ${ticket.area})` : ""}${batched ? " (batched)" : ""}`,
       { ticketId: a.ticketId, agentId: a.agentId },
     );
-    const p = this.runTicket(a)
+    const ctl = new AbortController();
+    this.ticketAborts.set(a.ticketId, ctl);
+    const p = this.runTicket(a, AbortSignal.any([this.abort.signal, ctl.signal]))
       .catch((err) => this.sendBack(a, `Unexpected error: ${(err as Error).message}`, { penalty: 0 }))
       .finally(() => {
         this.running.delete(a.ticketId);
+        this.ticketAborts.delete(a.ticketId);
+        for (const id of a.batch) this.interrupted.delete(id);
         this.poke();
       });
     this.running.set(a.ticketId, p);
   }
 
-  private async runTicket(a: Assignment): Promise<void> {
+  private async runTicket(a: Assignment, signal: AbortSignal): Promise<void> {
     const repo = this.repo!;
     const tickets = a.batch.map((id) => this.board.ticket(id));
     const t = tickets[0]!;
@@ -1183,7 +1348,9 @@ ${log.slice(0, 15).map((l) => `- ${l}`).join("\n")}`;
         context: { ticket: { ...t }, batch: tickets.map((x) => ({ ...x })), prd: this.prd },
       },
       a.batch,
+      { signal },
     );
+    if (signal.aborted) return this.sendBack(a, "Interrupted");
     // Build spend is tracked per ticket for the CFO, split evenly in a batch.
     for (const x of tickets) {
       this.board.updateTicket(x.id, { buildSpendUsd: (x.buildSpendUsd ?? 0) + build.costUsd / tickets.length });
@@ -1247,8 +1414,9 @@ ${log.slice(0, 15).map((l) => `- ${l}`).join("\n")}`;
         context: { ticket: { ...this.board.ticket(t.id) }, batch: a.batch.map((id) => ({ ...this.board.ticket(id) })) },
       },
       a.batch,
-      { keepStatus: true },
+      { keepStatus: true, signal },
     );
+    if (signal.aborted) return this.sendBack(a, "Interrupted");
     let verdict: { verdict: "approve" | "changes"; feedback: string };
     try {
       verdict = parseWith(ReviewSchema, review.text);
@@ -1317,6 +1485,7 @@ ${log.slice(0, 15).map((l) => `- ${l}`).join("\n")}`;
     feedback: string,
     opts: { discardBranch?: boolean; penalty?: number; cutOff?: boolean } = {},
   ): Promise<void> {
+    if (this.abort.signal.aborted || a.batch.some((id) => this.interrupted.has(id))) return this.abandon(a);
     const batched = a.batch.length > 1;
     await this.repo!.closeWorktree(a.ticketId, opts.discardBranch || batched).catch(() => undefined);
     this.board.releaseLease(a.ticketId);
@@ -1355,6 +1524,25 @@ ${log.slice(0, 15).map((l) => `- ${l}`).join("\n")}`;
       this.board.log("warn", `${t.id} sent back: ${feedback}`, meta);
       if (escalate) this.board.log("info", `${t.id} escalated to the tech lead for its last attempt`, meta);
     }
+  }
+
+  /** A ticket interrupted by Stop: back to the board untouched, no attempt or penalty. */
+  private async abandon(a: Assignment): Promise<void> {
+    await this.repo!.closeWorktree(a.ticketId, true).catch(() => undefined);
+    this.board.releaseLease(a.ticketId);
+    for (const id of a.batch) {
+      const cancelled = this.interrupted.get(id) === "cancel";
+      this.board.moveTicket(id, cancelled ? "skipped" : "ready", {
+        assignee: undefined,
+        batchWith: undefined,
+        ...(a.batch.length > 1 ? { noBatch: true } : {}),
+      });
+    }
+    this.board.updateAgent(a.agentId, {
+      status: "idle",
+      currentTicket: undefined,
+      activity: this.abort.signal.aborted ? "Stopped" : `Interrupted on ${a.batch.join(", ")}`,
+    });
   }
 
   // ---- CFO -------------------------------------------------------------
@@ -1531,7 +1719,7 @@ ${(t.failures ?? []).map((f, i) => `${i + 1}. ${f}`).join("\n")}
     agentId: string,
     task: Omit<AgentTask, "agentId" | "role">,
     ticketIds: string[] = [],
-    opts: { keepStatus?: boolean } = {},
+    opts: { keepStatus?: boolean; signal?: AbortSignal } = {},
   ): Promise<AgentResult> {
     const agent = this.board.agent(agentId);
     const prevStatus = agent.status;
@@ -1539,7 +1727,7 @@ ${(t.failures ?? []).map((f, i) => `${i + 1}. ${f}`).join("\n")}
     const res = await this.runner.run(
       { ...task, agentId, role: agent.role },
       (line) => this.board.updateAgent(agentId, { activity: line }),
-      this.abort.signal,
+      opts.signal ?? this.abort.signal,
     );
     if (ticketIds.length === 0) this.board.addSpend(agentId, res.costUsd);
     for (const id of ticketIds) this.board.addSpend(agentId, res.costUsd / ticketIds.length, id);

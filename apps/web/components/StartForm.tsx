@@ -12,6 +12,8 @@ export function StartForm({ onCancel }: { onCancel?: () => void }) {
   const [idea, setIdea] = useState("");
   const [runner, setRunner] = useState<"mock" | "claude">("mock");
   const [model, setModel] = useState("");
+  /** Per-role overrides; a role left out uses the default model. */
+  const [roleModels, setRoleModels] = useState<Record<string, string>>({});
   const [keyInput, setKeyInput] = useState("");
   const [replacingKey, setReplacingKey] = useState(false);
   const [engineers, setEngineers] = useState(1);
@@ -77,6 +79,7 @@ export function StartForm({ onCancel }: { onCancel?: () => void }) {
         continueFrom: continuing ? product : undefined,
         runner,
         model: claude ? model : undefined,
+        models: claude ? roleModels : undefined,
         engineersPerArea: engineers,
         floaters,
         budgetUsd: budget,
@@ -219,7 +222,7 @@ export function StartForm({ onCancel }: { onCancel?: () => void }) {
             )}
 
             <label>
-              Model
+              Default model
               <select value={model} onChange={(e) => setModel(e.target.value)}>
                 {config?.models.map((m) => (
                   <option key={m.id} value={m.id}>
@@ -229,6 +232,43 @@ export function StartForm({ onCancel }: { onCancel?: () => void }) {
               </select>
               {selectedModel && <span className="hint">{selectedModel.hint}</span>}
             </label>
+
+            <details className="role-models" open={Object.keys(roleModels).length > 0}>
+              <summary>
+                Model for each agent
+                {Object.keys(roleModels).length > 0 && <span className="hint"> · {Object.keys(roleModels).length} changed</span>}
+              </summary>
+              <p className="hint">
+                Design, branding and reviews need taste; engineers are most of the spend. A common setup: Sonnet or Opus
+                for the designer and marketing, Haiku for engineers. You can change these during the run too.
+              </p>
+              <div className="role-grid">
+                {config?.modelRoles.map((r) => (
+                  <label key={r.role}>
+                    {r.label}
+                    <select
+                      value={roleModels[r.role] ?? ""}
+                      onChange={(e) =>
+                        setRoleModels((m) => {
+                          const next = { ...m };
+                          if (e.target.value) next[r.role] = e.target.value;
+                          else delete next[r.role];
+                          return next;
+                        })
+                      }
+                    >
+                      <option value="">Default ({config.models.find((m) => m.id === model)?.label ?? "default"})</option>
+                      {config.models.map((m) => (
+                        <option key={m.id} value={m.id}>
+                          {m.label}
+                        </option>
+                      ))}
+                    </select>
+                    <span className="hint">{r.hint}</span>
+                  </label>
+                ))}
+              </div>
+            </details>
           </fieldset>
         )}
 

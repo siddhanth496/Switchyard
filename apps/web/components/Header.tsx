@@ -25,6 +25,8 @@ export function Header({
   running,
   onNew,
   onStop,
+  onPause,
+  onResume,
 }: {
   project: Project;
   status: string;
@@ -32,7 +34,10 @@ export function Header({
   running: boolean;
   onNew: () => void;
   onStop: () => void;
+  onPause: () => void;
+  onResume: () => void;
 }) {
+  const pausable = ["building", "testing", "paused"].includes(project.phase);
   // Older runs have no teams field: they had neither team.
   const steps = PHASES.filter((p) => !p.team || project.teams?.[p.team]);
   const current = steps.findIndex((p) => p.phases.includes(project.phase));
@@ -59,7 +64,7 @@ export function Header({
             <li key={p.label} className={now ? "now" : done ? "past" : ""} aria-current={now ? "step" : undefined}>
               <span className="n">{i + 1}</span>
               {p.label}
-              {now && project.phase === "paused" ? " (paused)" : ""}
+              {now && (project.phase === "paused" || project.held) ? " (paused)" : ""}
             </li>
           );
         })}
@@ -75,8 +80,13 @@ export function Header({
           </div>
         </div>
         <span className={`conn ${connection}`}>{connection === "live" ? "Live" : connection === "offline" ? "Offline" : "Connecting"}</span>
+        {running && pausable && (
+          <button className="btn" onClick={project.held ? onResume : onPause}>
+            {project.held ? "Resume" : "Pause"}
+          </button>
+        )}
         {running ? (
-          <button className="btn" onClick={onStop}>
+          <button className="btn btn-stop" onClick={onStop}>
             Stop
           </button>
         ) : (

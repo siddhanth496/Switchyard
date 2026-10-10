@@ -60,6 +60,8 @@ export interface Ticket {
   batchWith?: string[];
   /** Set after a batch was rejected, so the retry runs on its own. */
   noBatch?: boolean;
+  /** Notes the CEO added; every attempt's engineer sees them. */
+  ceoNotes?: string[];
   costUsd: number;
   createdAt: number;
   updatedAt: number;
@@ -181,6 +183,7 @@ export type ProjectPhase =
   | "paused" // waiting on a spend gate
   | "releasing" // waiting on the release gate
   | "shipped"
+  | "stopped" // the CEO pressed Stop
   | "failed";
 
 export interface Project {
@@ -195,6 +198,10 @@ export interface Project {
   brand?: Brand;
   /** Which optional teams take part in this run. */
   teams?: { marketing: boolean; design: boolean };
+  /** The CEO paused the build: running work finishes, nothing new starts. */
+  held?: boolean;
+  /** Model per role, when the agents are real. */
+  models?: Partial<Record<Role, string>>;
   createdAt: number;
 }
 

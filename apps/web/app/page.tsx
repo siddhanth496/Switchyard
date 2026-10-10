@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Activity } from "@/components/Activity";
 import { Board } from "@/components/Board";
+import { Controls } from "@/components/Controls";
 import { Decision } from "@/components/Decision";
 import { Header } from "@/components/Header";
 import { StartForm } from "@/components/StartForm";
@@ -32,9 +33,14 @@ export default function Home() {
   const total = state.tickets.length;
   const merged = state.tickets.filter((t) => t.status === "done").length;
   const waiting = state.gates.some((g) => g.status === "pending");
+  const phase = state.project.phase;
+  const live = !["shipped", "failed", "stopped"].includes(phase);
+  const steering = ["building", "testing", "paused"].includes(phase);
   const status = waiting
     ? "Waiting on your decision"
-    : ({
+    : state.project.held && steering
+      ? `Paused by you · ${merged} of ${total} tickets merged`
+      : ({
         idle: "Starting up",
         planning: "PM is writing the PRD",
         branding: "Marketing is naming and branding the product",
@@ -49,6 +55,7 @@ export default function Home() {
             ? "Designer is reviewing the running screens"
             : "QA is testing the build",
         paused: "Paused at the budget",
+        stopped: "Stopped by you. Continue it later from the start screen.",
         releasing: "Ready to release",
         shipped: merged === total ? `Shipped with all ${total} tickets merged` : `Shipped with ${merged} of ${total} tickets merged`,
         failed: "Stopped. Retry failed tickets to continue.",
@@ -60,16 +67,19 @@ export default function Home() {
         project={state.project}
         status={status}
         connection={connection}
-        running={state.project.phase !== "shipped" && state.project.phase !== "failed"}
+        running={live}
         onNew={() => setStarting(true)}
         onStop={() => void api.stop()}
+        onPause={() => void api.pause()}
+        onResume={() => void api.resume()}
       />
       <Decision gates={state.gates} />
+      {steering && <Controls project={state.project} />}
       <div className="floor">
-        <Team agents={state.agents} areas={state.areas} />
+        <Team agents={state.agents} areas={state.areas} project={state.project} />
         <div>
           <h2 className="panel-title">Job board</h2>
-          <Board tickets={state.tickets} agents={state.agents} areas={state.areas} />
+          <Board tickets={state.tickets} agents={state.agents} areas={state.areas} active={steering} />
         </div>
         <Activity log={state.log} />
       </div>

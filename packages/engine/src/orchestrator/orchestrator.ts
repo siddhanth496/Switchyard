@@ -46,6 +46,22 @@ export interface OrchestratorConfig {
   qaRounds?: number;
 }
 
+/** Starting .gitignore for every product repo: dependencies, builds, secrets and OS clutter. */
+const PRODUCT_GITIGNORE = `node_modules/
+.pnpm-store/
+dist/
+build/
+out/
+.next/
+.turbo/
+coverage/
+*.log
+.env
+.env.*
+!.env.example
+.DS_Store
+`;
+
 const IDS = { pm: "pm", taskCreator: "task-creator", techLead: "tech-lead", qa: "qa", cfo: "cfo" } as const;
 
 /**
@@ -207,6 +223,7 @@ export class Orchestrator {
     try {
       await repo.init({
         "README.md": `# ${this.board.project!.name}\n\n${idea}\n\nBuilt by an AI software company.\n`,
+        ".gitignore": PRODUCT_GITIGNORE,
         "docs/owners/.gitkeep": "",
       });
       this.board.log("info", "Created the product repo");
@@ -317,18 +334,17 @@ export class Orchestrator {
   /** Create engineers for each area from the approved architecture. */
   private staffAreas(arch: Architecture): Area[] {
     const areas: Area[] = [];
+    // Every area, shared included, gets its own engineers. The tech lead
+    // reviews and takes escalations; making it a builder too turned it into
+    // a single lane that every foundation ticket queued behind.
     for (const a of arch.areas) {
-      if (a.shared) {
-        areas.push({ ...a, lead: IDS.techLead, members: [IDS.techLead], shared: true });
-        continue;
-      }
       const members: string[] = [];
       for (let i = 1; i <= this.cfg.engineersPerArea; i++) {
         const id = `eng-${a.id}-${i}`;
         this.board.addAgent({ id, name: `Engineer ${a.id} ${i}`, role: "engineer", area: a.id });
         members.push(id);
       }
-      areas.push({ id: a.id, name: a.name, paths: a.paths, lead: members[0]!, members });
+      areas.push({ id: a.id, name: a.name, paths: a.paths, lead: members[0]!, members, ...(a.shared ? { shared: true } : {}) });
     }
     for (let i = 1; i <= this.cfg.floaters; i++) {
       this.board.addAgent({ id: `eng-floater-${i}`, name: `Engineer floater ${i}`, role: "engineer" });

@@ -34,7 +34,6 @@ export function Team({ agents, areas }: { agents: Agent[]; areas: Area[] }) {
         ))}
       </div>
       {areas
-        .filter((ar) => !ar.shared)
         .map((area) => (
           <div className="team-group" key={area.id}>
             <h3>

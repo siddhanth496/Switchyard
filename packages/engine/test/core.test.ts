@@ -110,7 +110,7 @@ describe("dispatcher", () => {
     expect(plan.waiting[0]?.reason).toBe("waiting on A");
   });
 
-  it("runs shared-area tickets one at a time", () => {
+  it("limits a shared area to the engineers it has", () => {
     const plan = planDispatch({
       tickets: [
         ticket("A", { area: "shared", files: ["package.json"], status: "in_progress" }),
@@ -121,6 +121,23 @@ describe("dispatcher", () => {
       leases: [{ ticketId: "A", agentId: "tl", files: ["package.json"], acquiredAt: 0 }],
     });
     expect(plan.waiting[0]?.reason).toMatch(/at its limit of 1/);
+  });
+
+  it("runs shared tickets in parallel when their files don't overlap", () => {
+    const sharedAreas = areas.map((a) => (a.id === "shared" ? { ...a, lead: "s1", members: ["s1", "s2"] } : a));
+    const plan = planDispatch({
+      tickets: [
+        ticket("A", { area: "shared", files: ["package.json"] }),
+        ticket("B", { area: "shared", files: ["db/schema.sql"] }),
+      ],
+      areas: sharedAreas,
+      agents: [agent("s1", { area: "shared" }), agent("s2", { area: "shared" })],
+      leases: [],
+    });
+    expect(plan.assignments.map((a) => [a.ticketId, a.agentId])).toEqual([
+      ["A", "s1"],
+      ["B", "s2"],
+    ]);
   });
 
   it("lends an idle engineer when an area's backlog builds up", () => {

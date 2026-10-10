@@ -27,6 +27,10 @@ pnpm web           # UI on http://localhost:3000
 
 Pick **Demo agents** in the UI to watch the flow for free, or **Claude agents** for real work. To try the failure flow with demo agents, start the API with `MOCK_FAIL="App shell" pnpm api`: that ticket always fails.
 
+### Where product repos go
+
+Each product gets its own git repo in `~/switchyard-workspace` by default (set `WORKSPACE` to change it). Keep it out of iCloud-synced folders such as Desktop and Documents: iCloud makes `file 2` copies of fast-changing files, which corrupts the agents' git worktrees. The server warns if the workspace looks synced. New product repos start with a `.gitignore` for dependencies, builds and secrets.
+
 ### Using real Claude agents
 
 Claude agents run through the [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview) and are billed to an Anthropic API key from [console.anthropic.com](https://console.anthropic.com).
@@ -55,10 +59,10 @@ This is the core of the design.
 - **Task creator (LLM)** breaks the PRD into tickets, each tagged with the files it will touch and its dependencies. Work that crosses areas is split into one ticket per area.
 - **Dispatcher (plain code, no LLM)** assigns ready tickets each tick:
   1. all dependencies are done;
-  2. the ticket's area is under its parallel limit (shared areas run one ticket at a time);
+  2. the ticket's area is under its parallel limit (one ticket per engineer in the area);
   3. no live **file lease** overlaps the ticket's files;
   4. an idle member of the area takes it, the area lead first. If the area's backlog reaches the lending threshold, an idle engineer is **lent**: a floater first, then one whose own area has nothing ready.
-- **Ownership areas** are path prefixes defined by the tech lead and approved by you. Each area has a lead; hotspots (manifests, schema) go in a small shared area owned by the tech lead.
+- **Ownership areas** are path prefixes defined by the tech lead and approved by you. Each area, including the small shared area for hotspots (manifests, schema), has its own engineers and a lead. The tech lead doesn't build: it reviews every PR and takes escalated tickets, so it never becomes a single lane everyone queues behind.
 - **File leases** are held from start until merge. If an engineer touches files another ticket holds, the attempt is discarded and sent back.
 - **Owner notes** (`docs/owners/<area>.md` in the product repo) carry context across sessions. Engineers read them before each ticket; after a merge, the engineer's notes are recorded under the area lead's name, so the lead is the single writer.
 - **Failures don't block the build.** A rejected review, failed build or merge conflict sends the ticket back with feedback. The owner gets the first two attempts; the third is **escalated to the tech lead** with the full failure history (and, with Claude agents, the next model up: Haiku → Sonnet → Opus). If that fails too, a decision card asks you to **retry with guidance** or **skip** the ticket. Independent tickets keep building while you decide. Skipped tickets count as resolved: dependents start, told to stub around the missing work, and the release notes list what was skipped. In unattended runs (`--auto`), failed tickets are skipped rather than retried, so a broken ticket can't burn the budget.
@@ -76,7 +80,7 @@ packages/engine/       the company: board, dispatcher, agents, git, orchestrator
   test/                unit tests + end-to-end runs with real git
 apps/server/           Hono API + server-sent events
 apps/web/              Next.js dashboard
-workspace/             generated product repos (gitignored)
+~/switchyard-workspace/  generated product repos (set WORKSPACE to change)
 ```
 
 ## API

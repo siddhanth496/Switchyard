@@ -121,7 +121,9 @@ export function planDispatch(input: DispatchInput, options: DispatchOptions = {}
       waiting.push({ ticketId: ticket.id, reason: `unknown area "${ticket.area}"` });
       continue;
     }
-    const limit = area.maxParallel ?? (area.shared ? 1 : Math.max(1, area.members.length));
+    // File leases already keep parallel tickets off each other's files, so a
+    // shared area can run as many tickets as it has engineers.
+    const limit = area.maxParallel ?? Math.max(1, area.members.length);
     if ((running.get(area.id) ?? 0) >= limit) {
       waiting.push({ ticketId: ticket.id, reason: `area ${area.id} at its limit of ${limit}` });
       continue;

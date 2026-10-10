@@ -50,6 +50,14 @@ describe("orchestrator (mock agents, real git)", () => {
     expect(readFileSync(join(dir, "docs/owners/api.md"), "utf8")).toContain("Notes CRUD API");
     expect(git(dir, "status", "--porcelain").trim()).toBe("");
 
+    // Shared-area work goes to the shared area's engineer; the tech lead only reviews.
+    const setup = tickets.find((t) => t.title.startsWith("Project manifest"))!;
+    expect(setup.assignee).toBe("eng-shared-1");
+    expect(tickets.some((t) => t.assignee === "tech-lead")).toBe(false);
+
+    // Product repos ignore installs and builds from the first commit.
+    expect(readFileSync(join(dir, ".gitignore"), "utf8")).toContain("node_modules/");
+
     // Dependencies were respected: setup merged before the API tickets.
     const merges = git(dir, "log", "--reverse", "--format=%s", "--merges");
     const order = merges.split("\n").filter(Boolean);

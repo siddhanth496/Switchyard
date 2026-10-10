@@ -1,4 +1,5 @@
-import { resolve, dirname } from "node:path";
+import { homedir } from "node:os";
+import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
@@ -16,7 +17,13 @@ import {
 
 const here = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT ?? 4000);
-const WORKSPACE = resolve(process.env.WORKSPACE ?? resolve(here, "../../../workspace"));
+// Product repos live outside the Switchyard checkout by default, in the home
+// folder itself, which iCloud doesn't sync (Desktop and Documents can be).
+const WORKSPACE = resolve(process.env.WORKSPACE ?? join(homedir(), "switchyard-workspace"));
+const ICLOUD_HINT =
+  WORKSPACE.includes("/Library/Mobile Documents/") ||
+  WORKSPACE.startsWith(join(homedir(), "Desktop")) ||
+  WORKSPACE.startsWith(join(homedir(), "Documents"));
 const DEFAULT_RUNNER = (process.env.RUNNER ?? "mock") as "mock" | "claude";
 const WEB_ORIGIN = process.env.WEB_ORIGIN ?? "http://localhost:3000";
 
@@ -208,4 +215,10 @@ serve({ fetch: app.fetch, port: PORT }, () => {
   console.log(`  runner: ${DEFAULT_RUNNER} (set RUNNER=claude for real agents)`);
   console.log(`  API key: ${envKey ? "from ANTHROPIC_API_KEY" : "not set (add it in the UI)"}`);
   console.log(`  workspace: ${WORKSPACE}`);
+  if (ICLOUD_HINT) {
+    console.warn(
+      "  warning: the workspace may be synced by iCloud Drive. Syncing a folder that agents change fast\n" +
+        '  creates "file 2" duplicates and corrupts git. Set WORKSPACE to a folder outside Desktop/Documents.',
+    );
+  }
 });

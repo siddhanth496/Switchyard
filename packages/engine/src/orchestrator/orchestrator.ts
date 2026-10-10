@@ -1,4 +1,5 @@
-import { join, resolve } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { basename, join, resolve } from "node:path";
 import { Board } from "../core/board.js";
 import { planDispatch, type Assignment } from "../core/dispatcher.js";
 import { anyOverlap, overlaps, resolveArea } from "../core/paths.js";
@@ -17,6 +18,7 @@ import {
 import {
   architecturePrompt,
   buildPrompt,
+  prdChangePrompt,
   prdPrompt,
   qaPrompt,
   reviewPrompt,
@@ -97,6 +99,9 @@ export class Orchestrator {
   private buildLoop: Promise<void> | null = null;
   private abort = new AbortController();
   private qaRound = 0;
+  private releaseRound = 0;
+  /** True when working on a product that already exists. */
+  private existing = false;
   private unitUsd = 0;
   private mergeCount = 0;
   private qaNotes: string[] = [];
@@ -133,10 +138,10 @@ export class Orchestrator {
   // ---- public controls -------------------------------------------------
 
   /** Start a new product. Returns at once; the pipeline runs in the background. */
-  start(idea: string, name?: string): Project {
+  start(idea: string, name?: string, opts: { existingDir?: string } = {}): Project {
     if (this.pipeline) throw new Error("A project is already running");
     this.abort = new AbortController();
-    const project = this.setup(idea, name);
+    const project = this.setup(idea, name, opts.existingDir);
     this.pipeline = this.runPipeline(idea).finally(() => {
       this.pipeline = null;
     });
@@ -144,8 +149,8 @@ export class Orchestrator {
   }
 
   /** Start and wait for the pipeline to finish (CLI and tests). */
-  async run(idea: string, name?: string): Promise<Project> {
-    this.start(idea, name);
+  async run(idea: string, name?: string, opts: { existingDir?: string } = {}): Promise<Project> {
+    this.start(idea, name, opts);
     await this.pipeline;
     if (this.buildLoop) await this.buildLoop;
     return this.board.project!;
@@ -197,18 +202,20 @@ export class Orchestrator {
 
   // ---- pipeline --------------------------------------------------------
 
-  private setup(idea: string, name?: string): Project {
+  private setup(idea: string, name?: string, existingDir?: string): Project {
     this.board.reset();
+    this.existing = !!existingDir;
+    const existingName = existingDir ? productName(existingDir) : undefined;
     const slug =
-      (name ?? idea)
+      (name ?? existingName ?? idea)
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, "-")
         .replace(/^-|-$/g, "")
         .slice(0, 32) || "product";
-    const dir = join(this.cfg.workspaceDir, `${slug}-${Date.now().toString(36)}`);
+    const dir = existingDir ?? join(this.cfg.workspaceDir, `${slug}-${Date.now().toString(36)}`);
     const project: Project = {
       id: slug,
-      name: name ?? idea.split(/[.\n]/)[0]!.slice(0, 60),
+      name: name ?? existingName ?? idea.split(/[.\n]/)[0]!.slice(0, 60),
       idea,
       dir,
       phase: "planning",
@@ -222,6 +229,7 @@ export class Orchestrator {
     this.board.addAgent({ id: IDS.taskCreator, name: "Task creator", role: "task_creator" });
     this.board.addAgent({ id: IDS.qa, name: "QA", role: "qa", activity: "Tests the build before release" });
     this.qaRound = 0;
+    this.releaseRound = 0;
     this.unitUsd = 0;
     this.mergeCount = 0;
     this.qaNotes = [];
@@ -239,68 +247,81 @@ export class Orchestrator {
   private async runPipeline(idea: string): Promise<void> {
     const repo = this.repo!;
     try {
-      await repo.init({
-        "README.md": `# ${this.board.project!.name}\n\n${idea}\n\nBuilt by an AI software company.\n`,
-        ".gitignore": PRODUCT_GITIGNORE,
-        "docs/owners/.gitkeep": "",
-      });
-      this.board.log("info", "Created the product repo");
+      if (this.existing) {
+        this.board.log("info", `Continuing ${this.board.project!.name}: ${idea}`);
+      } else {
+        await repo.init({
+          "README.md": `# ${this.board.project!.name}\n\n${idea}\n\nBuilt by an AI software company.\n`,
+          ".gitignore": PRODUCT_GITIGNORE,
+          "docs/owners/.gitkeep": "",
+        });
+        this.board.log("info", "Created the product repo");
+      }
+      const existingFiles = this.existing ? await repo.listFiles() : undefined;
 
-      // 1. PRD
+      // 1. PRD (for an existing product: the PM updates it for the change)
+      const currentPrd = this.existing ? repo.readMain("docs/PRD.md") || repo.readMain("README.md") : "";
       this.prd = await this.untilApproved("prd", async (feedback, previous) => {
         this.board.updateProject({ phase: "planning" });
         const res = await this.runAgent(IDS.pm, {
           kind: "prd",
           systemPrompt: systemPrompts.pm,
-          prompt: prdPrompt(idea, feedback, previous),
+          prompt: this.existing ? prdChangePrompt(currentPrd, idea, feedback, previous) : prdPrompt(idea, feedback, previous),
           cwd: repo.dir,
           canWrite: false,
           context: { idea, feedback },
         });
-        return { title: "Approve the PRD", content: res.text, value: res.text };
+        return { title: this.existing ? "Approve the updated PRD" : "Approve the PRD", content: res.text, value: res.text };
       });
-      await repo.commitToMain({ "docs/PRD.md": this.prd }, "PM: add PRD");
+      await repo.commitToMain({ "docs/PRD.md": this.prd }, this.existing ? "PM: update PRD" : "PM: add PRD");
 
-      // 2. Architecture and areas
-      const arch = await this.untilApproved<Architecture>("architecture", async (feedback) => {
-        this.board.updateProject({ phase: "architecture" });
-        const res = await this.runAgent(IDS.techLead, {
-          kind: "architecture",
-          systemPrompt: systemPrompts.tech_lead,
-          prompt: architecturePrompt(this.prd, feedback),
-          cwd: repo.dir,
-          canWrite: false,
-          context: { prd: this.prd, feedback },
+      // 2. Architecture and areas (an existing product reuses its saved areas)
+      let arch = this.existing ? savedAreas(repo.readMain("docs/areas.json")) : undefined;
+      if (arch) {
+        this.board.log("info", `Using the existing ownership areas: ${arch.areas.map((a) => a.id).join(", ")}`);
+      } else {
+        arch = await this.untilApproved<Architecture>("architecture", async (feedback) => {
+          this.board.updateProject({ phase: "architecture" });
+          const res = await this.runAgent(IDS.techLead, {
+            kind: "architecture",
+            systemPrompt: systemPrompts.tech_lead,
+            prompt: architecturePrompt(this.prd, feedback, existingFiles),
+            cwd: repo.dir,
+            canWrite: false,
+            context: { prd: this.prd, feedback },
+          });
+          const parsed = parseWith(ArchitectureSchema, res.text);
+          return { title: "Approve the architecture", content: renderArchitecture(parsed), value: parsed };
         });
-        const parsed = parseWith(ArchitectureSchema, res.text);
-        return { title: "Approve the architecture", content: renderArchitecture(parsed), value: parsed };
-      });
+      }
       this.architecture = arch.summary;
       const areas = this.staffAreas(arch);
+      const notes = Object.fromEntries(
+        areas
+          .filter((a) => !repo.readMain(`docs/owners/${a.id}.md`))
+          .map((a) => [`docs/owners/${a.id}.md`, `# Owner notes: ${a.name}\n\nPaths: ${a.paths.join(", ")}\nLead: ${a.lead}\n\n## Notes\n`]),
+      );
       await repo.commitToMain(
         {
           "docs/ARCHITECTURE.md": renderArchitecture(arch),
-          ...Object.fromEntries(
-            areas.map((a) => [
-              `docs/owners/${a.id}.md`,
-              `# Owner notes: ${a.name}\n\nPaths: ${a.paths.join(", ")}\nLead: ${a.lead}\n\n## Notes\n`,
-            ]),
-          ),
+          // Saved so a later change request can reuse the same areas.
+          "docs/areas.json": `${JSON.stringify(arch, null, 2)}\n`,
+          ...notes,
         },
-        "Tech lead: add architecture and owner notes",
+        "Tech lead: architecture, areas and owner notes",
       );
 
-      // 3. Tickets
+      // 3. Tickets (for an existing product: only the requested change)
       this.board.updateProject({ phase: "ticketing" });
       const plan = await this.runAgent(IDS.taskCreator, {
         kind: "tickets",
         systemPrompt: systemPrompts.task_creator,
-        prompt: ticketsPrompt(this.prd, this.architecture, areas),
+        prompt: ticketsPrompt(this.prd, this.architecture, areas, existingFiles ? { request: idea, existingFiles } : undefined),
         cwd: repo.dir,
         canWrite: false,
-        context: { prd: this.prd, areas },
+        context: { prd: this.prd, areas, changeRequest: this.existing ? idea : undefined },
       });
-      this.createTickets(parseWith(TicketPlanSchema, plan.text).tickets, areas);
+      this.createTickets(parseWith(TicketPlanSchema, plan.text).tickets, areas, this.existing ? "change" : undefined);
 
       // 4. Build
       this.board.updateProject({ phase: "building" });
@@ -371,7 +392,7 @@ export class Orchestrator {
     return areas;
   }
 
-  private createTickets(planned: { key: string; title: string; description: string; acceptance: string[]; area?: string; files: string[]; dependsOn: string[]; priority: number; size?: TicketSize }[], areas: Area[]): void {
+  private createTickets(planned: { key: string; title: string; description: string; acceptance: string[]; area?: string; files: string[]; dependsOn: string[]; priority: number; size?: TicketSize }[], areas: Area[], kind?: "change"): void {
     const idByKey = new Map<string, string>();
     for (const p of planned) idByKey.set(p.key, this.board.nextTicketId());
     const areaIds = new Set(areas.map((a) => a.id));
@@ -394,9 +415,10 @@ export class Orchestrator {
         priority: p.priority,
         size: p.size ?? "M",
         status: "ready",
+        ...(kind ? { kind } : {}),
       });
     }
-    this.board.log("info", `Task creator filed ${planned.length} tickets`);
+    this.board.log("info", `Task creator filed ${planned.length} ${kind === "change" ? "change " : ""}tickets`);
     this.allocateBudgets();
   }
 
@@ -431,15 +453,44 @@ export class Orchestrator {
   /** Build until the board is clear, let QA test, repeat for its bugs, then release. */
   private async build(): Promise<void> {
     for (;;) {
-      const outcome = await this.dispatchUntilDone();
-      if (outcome !== "done") return;
-      if (this.qaRound >= this.cfg.qaRounds) break;
-      const filed = await this.runQa();
-      if (this.abort.signal.aborted) return;
-      if (filed === 0) break;
+      for (;;) {
+        const outcome = await this.dispatchUntilDone();
+        if (outcome !== "done") return;
+        if (this.qaRound >= this.cfg.qaRounds) break;
+        const filed = await this.runQa();
+        if (this.abort.signal.aborted) return;
+        if (filed === 0) break;
+        this.board.updateProject({ phase: "building" });
+      }
+      // A held release comes back as change tickets; build, test and ask again.
+      const next = await this.release();
+      if (next !== "changes" || this.abort.signal.aborted) return;
       this.board.updateProject({ phase: "building" });
     }
-    await this.release();
+  }
+
+  /** Turn the CEO's feedback on a held release into change tickets. Returns how many. */
+  private async fileChangeTickets(feedback: string): Promise<number> {
+    const repo = this.repo!;
+    this.board.updateProject({ phase: "ticketing" });
+    try {
+      const areas = [...this.board.areas];
+      const res = await this.runAgent(IDS.taskCreator, {
+        kind: "tickets",
+        systemPrompt: systemPrompts.task_creator,
+        prompt: ticketsPrompt(this.prd, this.architecture, areas, { request: feedback, existingFiles: await repo.listFiles() }),
+        cwd: repo.dir,
+        canWrite: false,
+        context: { prd: this.prd, areas, changeRequest: feedback },
+      });
+      const planned = parseWith(TicketPlanSchema, res.text).tickets;
+      this.createTickets(planned, areas, "change");
+      return planned.length;
+    } catch (err) {
+      if (this.abort.signal.aborted) return 0;
+      this.board.log("warn", `Couldn't turn your feedback into tickets: ${(err as Error).message}`, { agentId: IDS.taskCreator });
+      return 0;
+    }
   }
 
   /** Dispatch until every ticket is merged or skipped. */
@@ -550,10 +601,10 @@ export class Orchestrator {
         status: "ready",
         kind: "bug",
         size: "M",
-        budgetUsd: unitsOf("M") * this.unitUsd,
       });
       this.traceBug(bug.title, bug.files);
     }
+    this.allocateBudgets();
     this.qaNotes.push(`Round ${round}: filed ${report.bugs.length} bug(s). ${report.summary}`.trim());
     this.board.updateAgent(IDS.qa, { activity: `Round ${round}: filed ${report.bugs.length} bug(s)` });
     this.board.log("warn", `QA round ${round} filed ${report.bugs.length} bug(s)`, { agentId: IDS.qa });
@@ -570,7 +621,7 @@ export class Orchestrator {
     this.score(culprit.assignee, POINTS.bugTraced, { bugs: 1 }, `QA traced "${title}" to ${culprit.id}`);
   }
 
-  private async release(): Promise<void> {
+  private async release(): Promise<"shipped" | "changes"> {
     this.board.updateProject({ phase: "releasing" });
     const log = await this.repo!.log(50);
     const tickets = this.board.tickets;
@@ -593,14 +644,27 @@ ${this.qaNotes.length > 0 ? `\n${this.qaNotes.map((n) => `- ${n}`).join("\n")}\n
 
 Recent commits:
 ${log.slice(0, 15).map((l) => `- ${l}`).join("\n")}`;
-    const gate = await this.waitForGate(this.board.openGate("release", "Approve the v1 release", summary));
+    const title = this.releaseRound === 0 ? (this.existing ? "Approve the release" : "Approve the v1 release") : `Approve the release (round ${this.releaseRound + 1})`;
+    const gate = await this.waitForGate(this.board.openGate("release", title, summary));
     if (gate.status === "approved") {
       this.board.updateProject({ phase: "shipped" });
-      this.board.log("info", "Shipped v1");
-    } else {
-      this.board.updateProject({ phase: "failed" });
-      this.board.log("warn", `Release held by the CEO: ${gate.feedback ?? ""}`);
+      this.board.log("info", this.existing ? "Shipped the update" : "Shipped v1");
+      return "shipped";
     }
+
+    // Held: the CEO's feedback becomes change tickets, then build, QA and ask again.
+    const feedback = gate.feedback?.trim() ?? "";
+    this.board.log("info", `CEO held the release: ${feedback}`);
+    this.releaseRound++;
+    const filed = feedback ? await this.fileChangeTickets(feedback) : 0;
+    if (filed > 0) {
+      this.qaRound = 0; // the changes get a fresh QA pass
+      this.knownIssues = [];
+      this.qaNotes.push(`Release round ${this.releaseRound}: you asked for changes (${filed} ticket(s)).`);
+    } else {
+      this.board.log("warn", "No change tickets came out of the feedback; asking for the release again", { agentId: IDS.taskCreator });
+    }
+    return "changes";
   }
 
   private sleepUntilWoken(): Promise<void> {
@@ -905,19 +969,40 @@ traced to them. Your spend cap is tight on this one. Make the smallest correct c
   }
 
   /** Split the ticket budget pool by size, keeping a reserve for reviews, QA and retries. */
+  /**
+   * Budget tickets by size. The first plan sets the price of a budget unit
+   * from the project budget (keeping a reserve for reviews, QA and retries);
+   * tickets added later (QA bugs, change requests) are priced at the same
+   * rate, so a small change can't claim the whole pot.
+   */
   private allocateBudgets(): void {
     const p = this.board.project!;
-    const open = this.board.tickets.filter((t) => !["done", "skipped"].includes(t.status));
-    this.unitUsd = unitPrice(p.budgetUsd - p.spentUsd, open.map((t) => t.size));
-    for (const t of open) this.board.updateTicket(t.id, { budgetUsd: unitsOf(t.size) * this.unitUsd });
-    const pool = open.reduce((n, t) => n + unitsOf(t.size) * this.unitUsd, 0);
-    const price = (s: "S" | "M" | "L") => `${s} $${(unitsOf(s) * this.unitUsd).toFixed(2)}`;
+    const unbudgeted = this.board.tickets.filter((t) => t.budgetUsd === undefined && !["done", "skipped"].includes(t.status));
+    if (unbudgeted.length === 0) return;
+    const first = this.unitUsd === 0;
+    if (first) this.unitUsd = unitPrice(p.budgetUsd - p.spentUsd, unbudgeted.map((t) => t.size));
+    for (const t of unbudgeted) this.board.updateTicket(t.id, { budgetUsd: unitsOf(t.size) * this.unitUsd });
+    const total = unbudgeted.reduce((n, t) => n + unitsOf(t.size) * this.unitUsd, 0);
+    const price = (sz: "S" | "M" | "L") => `${sz} $${(unitsOf(sz) * this.unitUsd).toFixed(2)}`;
     this.board.log(
       "info",
-      `CFO allocated $${pool.toFixed(2)} across ${open.length} tickets by size (${price("S")}, ${price("M")}, ${price("L")}), ` +
-        `keeping $${(p.budgetUsd - p.spentUsd - pool).toFixed(2)} for reviews, QA and retries`,
+      first
+        ? `CFO allocated $${total.toFixed(2)} across ${unbudgeted.length} tickets by size (${price("S")}, ${price("M")}, ${price("L")}), ` +
+            `keeping $${(p.budgetUsd - p.spentUsd - total).toFixed(2)} for reviews, QA and retries`
+        : `CFO budgeted ${unbudgeted.length} new ticket(s) at the plan's rates: $${total.toFixed(2)}`,
       { agentId: IDS.cfo },
     );
+  }
+
+  /** After a budget top-up, scale the rate and every open ticket's budget with it. */
+  private rescaleBudgets(factor: number): void {
+    this.unitUsd *= factor;
+    for (const t of this.board.tickets) {
+      if (t.budgetUsd !== undefined && !["done", "skipped"].includes(t.status)) {
+        this.board.updateTicket(t.id, { budgetUsd: t.budgetUsd * factor });
+      }
+    }
+    this.board.log("info", `CFO raised open ticket budgets by ${Math.round((factor - 1) * 100)}% with the new money`, { agentId: IDS.cfo });
   }
 
   /** Open a decision card for a failed ticket. Other work keeps going meanwhile. */
@@ -1018,8 +1103,9 @@ ${(t.failures ?? []).map((f, i) => `${i + 1}. ${f}`).join("\n")}
     void this.waitForGate(gate).then(
       (g) => {
         if (g.status === "approved") {
-          this.board.updateProject({ phase: "building", budgetUsd: p.budgetUsd + this.cfg.budgetUsd });
-          this.allocateBudgets();
+          const before = p.budgetUsd;
+          this.board.updateProject({ phase: "building", budgetUsd: before + this.cfg.budgetUsd });
+          this.rescaleBudgets((before + this.cfg.budgetUsd) / before);
         } else {
           this.board.log("warn", "CEO declined more budget; stopping");
           this.stop();
@@ -1028,6 +1114,23 @@ ${(t.failures ?? []).map((f, i) => `${i + 1}. ${f}`).join("\n")}
       },
       () => undefined,
     );
+  }
+}
+
+/** A product's name from its README's first heading, else its folder name. */
+function productName(dir: string): string {
+  const readme = existsSync(join(dir, "README.md")) ? readFileSync(join(dir, "README.md"), "utf8") : "";
+  const heading = readme.match(/^#\s+(.+)$/m)?.[1]?.trim();
+  return heading || basename(dir).replace(/-[a-z0-9]{6,9}$/, "");
+}
+
+/** Ownership areas saved by an earlier run, if they parse. */
+function savedAreas(json: string): Architecture | undefined {
+  if (!json.trim()) return undefined;
+  try {
+    return ArchitectureSchema.parse(JSON.parse(json));
+  } catch {
+    return undefined;
   }
 }
 

@@ -47,8 +47,8 @@ export interface Ticket {
   failures?: string[];
   /** True when the next attempt goes to the tech lead. */
   escalated?: boolean;
-  /** "bug" for tickets QA filed. */
-  kind?: "feature" | "bug";
+  /** "bug" for tickets QA filed, "change" for changes the CEO asked for. */
+  kind?: "feature" | "bug" | "change";
   /** Size the task creator gave it; the CFO budgets by size. */
   size?: TicketSize;
   /** What the CFO allotted for building it, in USD. */

@@ -30,6 +30,8 @@ export interface AgentTask {
     diff?: string;
     /** QA round, starting at 1. */
     qaRound?: number;
+    /** What the CEO asked to change in an existing product. */
+    changeRequest?: string;
   };
 }
 

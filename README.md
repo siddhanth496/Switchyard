@@ -27,6 +27,12 @@ pnpm web           # UI on http://localhost:3000
 
 Pick **Demo agents** in the UI to watch the flow for free, or **Claude agents** for real work. To try the failure flow with demo agents, start the API with `MOCK_FAIL="App shell" pnpm api`: that ticket always fails.
 
+### Changing a product
+
+- **Hold the release with feedback** ("Request changes" on the release card): the task creator turns your note into change tickets, the team builds them, QA re-tests, and the release card comes back as round 2.
+- **Continue a product later:** on the start screen choose *Continue a product*, pick one from your workspace and describe the change. The PM updates the PRD (you approve it), the team reuses the product's saved ownership areas (`docs/areas.json`), builds only the change, QA tests it, and you approve the release. Products built before areas were saved get a quick architecture pass from the tech lead first.
+- Change tickets are priced at the plan's rates, and small plans are priced as if they had 10 budget units, so one small change can't claim the whole budget.
+
 ### Where product repos go
 
 Each product gets its own git repo in `~/switchyard-workspace` by default (set `WORKSPACE` to change it). Keep it out of iCloud-synced folders such as Desktop and Documents: iCloud makes `file 2` copies of fast-changing files, which corrupts the agents' git worktrees. The server warns if the workspace looks synced. New product repos start with a `.gitignore` for dependencies, builds and secrets.

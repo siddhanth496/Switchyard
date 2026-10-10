@@ -146,6 +146,17 @@ export class ProjectRepo {
     if (deleteBranch) await this.git(["branch", "-D", this.branch(ticketId)]).catch(() => undefined);
   }
 
+  /** True if `dir` holds a git repo (not a worktree folder). */
+  static isRepo(dir: string): boolean {
+    return existsSync(join(dir, ".git")) && !dir.endsWith(".worktrees");
+  }
+
+  /** Tracked files on main, for giving agents a map of an existing product. */
+  async listFiles(limit = 300): Promise<string[]> {
+    const { stdout } = await this.git(["ls-files"]);
+    return stdout.split("\n").filter(Boolean).slice(0, limit);
+  }
+
   async log(n = 20): Promise<string[]> {
     const { stdout } = await this.git(["log", "--oneline", `-${n}`]);
     return stdout.split("\n").filter(Boolean);

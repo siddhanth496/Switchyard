@@ -1,3 +1,5 @@
+import { execFileSync } from "node:child_process";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,6 +13,7 @@ import {
   ClaudeRunner,
   MockRunner,
   Orchestrator,
+  ProjectRepo,
   type AgentRunner,
   type BoardEvent,
 } from "@agentco/engine";
@@ -59,6 +62,8 @@ function keyStatus() {
 
 const StartSchema = z.object({
   idea: z.string().min(3),
+  /** Folder of an existing product (from GET /api/products) to change instead of starting fresh. */
+  continueFrom: z.string().optional(),
   name: z.string().optional(),
   runner: z.enum(["mock", "claude"]).optional(),
   model: z.string().optional(),
@@ -152,6 +157,30 @@ app.get("/api/events", (c) =>
   }),
 );
 
+/** Products built earlier, newest first, so the CEO can continue one. */
+app.get("/api/products", (c) => {
+  if (!existsSync(WORKSPACE)) return c.json({ products: [] });
+  const products = readdirSync(WORKSPACE, { withFileTypes: true })
+    .filter((d) => d.isDirectory() && !d.name.endsWith(".worktrees"))
+    .map((d) => join(WORKSPACE, d.name))
+    .filter((dir) => ProjectRepo.isRepo(dir))
+    .map((dir) => {
+      const readme = existsSync(join(dir, "README.md")) ? readFileSync(join(dir, "README.md"), "utf8") : "";
+      const name = readme.match(/^#\s+(.+)$/m)?.[1]?.trim() ?? dir.split("/").pop()!;
+      let updatedAt = 0;
+      let commits = 0;
+      try {
+        updatedAt = Number(execFileSync("git", ["log", "-1", "--format=%ct"], { cwd: dir, encoding: "utf8" }).trim()) * 1000;
+        commits = Number(execFileSync("git", ["rev-list", "--count", "HEAD"], { cwd: dir, encoding: "utf8" }).trim());
+      } catch {
+        /* an empty repo */
+      }
+      return { dir, folder: dir.split("/").pop()!, name, updatedAt, commits, hasPrd: existsSync(join(dir, "docs/PRD.md")) };
+    })
+    .sort((a, b) => b.updatedAt - a.updatedAt);
+  return c.json({ products, workspace: WORKSPACE });
+});
+
 app.post("/api/projects", async (c) => {
   const body = StartSchema.parse(await c.req.json());
   if (orch?.isRunning) return c.json({ error: "A project is already running. Stop it first." }, 409);
@@ -175,7 +204,14 @@ app.post("/api/projects", async (c) => {
     },
     board,
   );
-  const project = orch.start(body.idea, body.name);
+  let existingDir: string | undefined;
+  if (body.continueFrom) {
+    existingDir = resolve(body.continueFrom);
+    if (!existingDir.startsWith(WORKSPACE + "/") || !ProjectRepo.isRepo(existingDir)) {
+      return c.json({ error: "That product isn't in the workspace." }, 400);
+    }
+  }
+  const project = orch.start(body.idea, body.name, { existingDir });
   return c.json({ project, runner: runnerName }, 201);
 });
 

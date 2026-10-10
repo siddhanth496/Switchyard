@@ -30,8 +30,13 @@ describe("CFO scoring", () => {
   });
 
   it("splits the budget by size and keeps a 25% reserve", () => {
-    const unit = unitPrice(10, ["S", "M", "L"]); // 7 units share $7.50
-    expect(unit).toBeCloseTo(7.5 / 7);
+    // 12 units share $7.50 of a $10 budget.
+    expect(unitPrice(10, ["L", "L", "M", "M"])).toBeCloseTo(7.5 / 12);
+  });
+
+  it("prices small plans as if they had 10 units, so one ticket can't take the whole pot", () => {
+    expect(unitPrice(10, ["S"])).toBeCloseTo(7.5 / 10);
+    expect(unitPrice(10, ["S", "M", "L"])).toBeCloseTo(7.5 / 10);
   });
 });
 

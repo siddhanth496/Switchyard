@@ -361,3 +361,53 @@ describe("CFO budgets and scorecards", () => {
     expect(orch.board.snapshot().log.some((l) => l.message.includes(`traced "Empty notes list shows a blank page" to ${notesPage.id}`))).toBe(true);
   }, 30_000);
 });
+
+describe("changes after the build", () => {
+  it("turns a held release into change tickets, rebuilds, re-tests and asks again", async () => {
+    const orch = new Orchestrator(new MockRunner({ stepMs: 0 }), {
+      workspaceDir: workspace(),
+      autoApprove: ["prd", "architecture"],
+      tickMs: 5,
+    });
+    orch.start("A notes app");
+    const first = await waitFor(() => orch.board.gates.find((g) => g.kind === "release" && g.status === "pending"), 20_000);
+    orch.reject(first.id, "Add a search box to the notes page");
+
+    const second = await waitFor(
+      () => orch.board.gates.find((g) => g.kind === "release" && g.status === "pending" && g.id !== first.id),
+      20_000,
+    );
+    expect(second.title).toBe("Approve the release (round 2)");
+    const change = orch.board.tickets.find((t) => t.kind === "change")!;
+    expect(change.title).toBe("Change: Add a search box to the notes page");
+    // Priced at the original plan's rate: same as the plan's other S ticket.
+    const setupS = orch.board.tickets.find((t) => t.title.startsWith("Project manifest"))!;
+    expect(change.budgetUsd).toBeCloseTo(setupS.budgetUsd!);
+    expect(change.status).toBe("done");
+    expect(orch.board.snapshot().log.some((l) => l.message === "QA round 1: testing the merged build")).toBe(true);
+    orch.approve(second.id);
+    await waitFor(() => (orch.board.project!.phase === "shipped" ? true : undefined));
+  }, 30_000);
+
+  it("continues an existing product: updates the PRD, reuses its areas, builds only the change", async () => {
+    const ws = workspace();
+    const first = new Orchestrator(new MockRunner({ stepMs: 0 }), { workspaceDir: ws, autoApprove: "all", tickMs: 5, qaRounds: 0 });
+    const v1 = await first.run("A notes app");
+    expect(v1.phase).toBe("shipped");
+    expect(readFileSync(join(v1.dir, "docs/areas.json"), "utf8")).toContain('"web"');
+    const commitsBefore = git(v1.dir, "rev-list", "--count", "main").trim();
+
+    const second = new Orchestrator(new MockRunner({ stepMs: 0 }), { workspaceDir: ws, autoApprove: "all", tickMs: 5, qaRounds: 0 });
+    const v2 = await second.run("Add tags to notes", undefined, { existingDir: v1.dir });
+    expect(v2.phase).toBe("shipped");
+    expect(v2.dir).toBe(v1.dir);
+    expect(v2.name).toBe(v1.name);
+    // Areas came from docs/areas.json: no architecture gate this time.
+    expect(second.board.gates.some((g) => g.kind === "architecture")).toBe(false);
+    expect(second.board.gates.find((g) => g.kind === "prd")!.title).toBe("Approve the updated PRD");
+    expect(second.board.tickets).toHaveLength(1);
+    expect(second.board.tickets[0]!.kind).toBe("change");
+    expect(Number(git(v1.dir, "rev-list", "--count", "main").trim())).toBeGreaterThan(Number(commitsBefore));
+    expect(readFileSync(join(v1.dir, "web/notes.html"), "utf8")).toContain("Change: Add tags to notes");
+  }, 40_000);
+});

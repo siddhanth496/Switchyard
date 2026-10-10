@@ -1,10 +1,14 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api, type ServerConfig } from "@/lib/api";
+import { api, type Product, type ServerConfig } from "@/lib/api";
 
 export function StartForm({ onCancel }: { onCancel?: () => void }) {
   const [config, setConfig] = useState<ServerConfig | null>(null);
+  const [mode, setMode] = useState<"new" | "continue">("new");
+  const [products, setProducts] = useState<Product[] | null>(null);
+  const [workspace, setWorkspace] = useState("");
+  const [product, setProduct] = useState<string>("");
   const [idea, setIdea] = useState("");
   const [runner, setRunner] = useState<"mock" | "claude">("mock");
   const [model, setModel] = useState("");
@@ -25,7 +29,17 @@ export function StartForm({ onCancel }: { onCancel?: () => void }) {
         setRunner(c.defaultRunner);
       })
       .catch(() => setError({ field: "form", message: "Couldn't load settings from the server." }));
+    api
+      .products()
+      .then((r) => {
+        setProducts(r.products);
+        setWorkspace(r.workspace);
+        if (r.products[0]) setProduct(r.products[0].dir);
+      })
+      .catch(() => setProducts([]));
   }, []);
+
+  const continuing = mode === "continue";
 
   const claude = runner === "claude";
   const showKeyInput = claude && (!config?.hasKey || replacingKey);
@@ -33,7 +47,12 @@ export function StartForm({ onCancel }: { onCancel?: () => void }) {
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (idea.trim().length < 3) return setError({ field: "idea", message: "Describe the product in a sentence or two first." });
+    if (continuing && !product) return setError({ field: "form", message: "Pick the product to continue." });
+    if (idea.trim().length < 3)
+      return setError({
+        field: "idea",
+        message: continuing ? "Describe what should change first." : "Describe the product in a sentence or two first.",
+      });
     if (!(budget > 0)) return setError({ field: "budget", message: "Set a budget above $0." });
     if (showKeyInput && !keyInput.trim()) return setError({ field: "key", message: "Paste your Anthropic API key to use Claude agents." });
 
@@ -53,6 +72,7 @@ export function StartForm({ onCancel }: { onCancel?: () => void }) {
       }
       await api.start({
         idea: idea.trim(),
+        continueFrom: continuing ? product : undefined,
         runner,
         model: claude ? model : undefined,
         engineersPerArea: engineers,
@@ -78,21 +98,56 @@ export function StartForm({ onCancel }: { onCancel?: () => void }) {
 
   return (
     <main className="start">
-      <h1>What should your company build?</h1>
+      <h1>{continuing ? "What should change?" : "What should your company build?"}</h1>
       <p className="lede">
-        Describe the product. The PM writes a PRD, the tech lead splits the code into areas, and engineers build
-        tickets in parallel. You approve each step.
+        {continuing
+          ? "Pick a product the team built before and describe the change. The PM updates the PRD, the team builds only what changed, and QA tests it before you release."
+          : "Describe the product. The PM writes a PRD, the tech lead splits the code into areas, and engineers build tickets in parallel. You approve each step."}
       </p>
       <form onSubmit={submit} noValidate>
+        <div className="mode" role="tablist" aria-label="What to do">
+          <button type="button" role="tab" aria-selected={!continuing} className={!continuing ? "on" : ""} onClick={() => setMode("new")}>
+            New product
+          </button>
+          <button type="button" role="tab" aria-selected={continuing} className={continuing ? "on" : ""} onClick={() => setMode("continue")}>
+            Continue a product
+          </button>
+        </div>
+
+        {continuing && (
+          <fieldset className="products">
+            <legend>Product</legend>
+            {products === null ? (
+              <p className="hint">Loading products...</p>
+            ) : products.length === 0 ? (
+              <p className="hint">No products yet in {workspace || "the workspace"}. Build one first.</p>
+            ) : (
+              products.map((p) => (
+                <label key={p.dir} className="product">
+                  <input type="radio" name="product" checked={product === p.dir} onChange={() => setProduct(p.dir)} />
+                  <span className="pname">{p.name}</span>
+                  <span className="hint">
+                    {p.folder}, {p.commits} commits{p.updatedAt ? `, last change ${new Date(p.updatedAt).toLocaleString()}` : ""}
+                  </span>
+                </label>
+              ))
+            )}
+          </fieldset>
+        )}
+
         <label>
-          The idea
+          {continuing ? "The change" : "The idea"}
           <textarea
             value={idea}
             onChange={(e) => {
               setIdea(e.target.value);
               if (error?.field === "idea") setError(null);
             }}
-            placeholder="A habit tracker for small teams, with streaks and a weekly email summary"
+            placeholder={
+              continuing
+                ? "Add a search box to the notes page, and let users pin notes to the top"
+                : "A habit tracker for small teams, with streaks and a weekly email summary"
+            }
             autoFocus
           />
           {fieldError("idea")}
@@ -205,7 +260,7 @@ export function StartForm({ onCancel }: { onCancel?: () => void }) {
         {error?.field === "form" && <p className="error">{error.message}</p>}
         <div style={{ display: "flex", gap: 8 }}>
           <button className="btn btn-primary submit" disabled={busy || !config}>
-            {busy ? "Starting..." : "Start the company"}
+            {busy ? "Starting..." : continuing ? "Start the change" : "Start the company"}
           </button>
           {onCancel && (
             <button type="button" className="btn btn-quiet" onClick={onCancel}>

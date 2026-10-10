@@ -835,3 +835,85 @@ h3 {
   color: var(--accent);
   font-weight: 500;
 }
+
+/* ---- continue a product ------------------------------------------------ */
+
+.start .mode {
+  display: inline-flex;
+  justify-self: start;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 3px;
+  background: var(--surface-2);
+}
+.start .mode button {
+  border: none;
+  background: transparent;
+  padding: 6px 14px;
+  border-radius: 6px;
+  font-weight: 500;
+  color: var(--muted);
+  cursor: pointer;
+}
+.start .mode button.on {
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: 0 0 0 1px var(--line);
+}
+.start .products {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px 12px;
+  margin: 0;
+  display: grid;
+  gap: 6px;
+  max-height: 260px;
+  overflow: auto;
+}
+.start .products legend {
+  font-size: 14px;
+  font-weight: 500;
+  padding: 0 4px;
+}
+.start .products .product {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 10px;
+  align-items: baseline;
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-weight: 400;
+}
+.start .products .product:has(input:checked) {
+  background: var(--accent-soft);
+}
+.start .products .product input {
+  grid-row: span 2;
+}
+.start .products .pname {
+  font-weight: 600;
+}
+.ticket .change-tag {
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.ticket .top {
+  align-items: center;
+}
+.ticket .top .id {
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+}
+.ticket .top > span:last-child {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}

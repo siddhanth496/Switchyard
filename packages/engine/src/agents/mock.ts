@@ -70,6 +70,11 @@ export class MockRunner implements AgentRunner {
       case "tickets": {
         await step("Splitting stories into tickets");
         await step("Tagging files and dependencies");
+        if (task.context.changeRequest) {
+          const title = `Change: ${task.context.changeRequest.split(/[.\n]/)[0]!.slice(0, 60)}`;
+          const plan = { tickets: [{ key: "change-1", title, area: "web", files: ["web/notes.html"], acceptance: [task.context.changeRequest], dependsOn: [], priority: 1, size: "S" }] };
+          return ok(`\`\`\`json\n${JSON.stringify(plan)}\n\`\`\``, 0.01);
+        }
         return ok(MOCK_TICKETS, 0.01);
       }
       case "build": {

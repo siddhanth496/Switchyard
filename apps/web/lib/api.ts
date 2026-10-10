@@ -13,8 +13,18 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
 
 const post = <T>(path: string, body: unknown = {}) => request<T>("POST", path, body);
 
+export interface Product {
+  dir: string;
+  folder: string;
+  name: string;
+  updatedAt: number;
+  commits: number;
+  hasPrd: boolean;
+}
+
 export interface StartOptions {
   idea: string;
+  continueFrom?: string;
   runner: "mock" | "claude";
   engineersPerArea: number;
   floaters: number;
@@ -42,6 +52,7 @@ export interface ServerConfig extends KeyStatus {
 
 export const api = {
   config: () => request<ServerConfig>("GET", "/api/config"),
+  products: () => request<{ products: Product[]; workspace: string }>("GET", "/api/products"),
   setKey: (key: string) => request<KeyStatus>("PUT", "/api/config/key", { key }),
   clearKey: () => request<KeyStatus>("DELETE", "/api/config/key"),
   start: (opts: StartOptions) => post("/api/projects", opts),

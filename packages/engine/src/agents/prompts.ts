@@ -94,20 +94,45 @@ export function prdPrompt(idea: string, feedback?: string, previous?: string): s
   return `The CEO's idea:\n\n${idea}\n\nWrite the PRD in markdown.`;
 }
 
-export function architecturePrompt(prd: string, feedback?: string): string {
-  return `PRD:\n\n${prd}\n\n${feedback ? `The CEO rejected your previous proposal. Feedback:\n${feedback}\n\n` : ""}\
-Propose the architecture for v1: a short summary (stack, structure, key decisions) and the ownership areas.
+/** The PM updates an existing product's PRD for a change request. */
+export function prdChangePrompt(currentPrd: string, change: string, feedback?: string, previous?: string): string {
+  if (feedback && previous) {
+    return `The CEO rejected your updated PRD.\n\nCEO feedback:\n${feedback}\n\nYour previous update:\n${previous}\n\nWrite the revised PRD in markdown.`;
+  }
+  return `This product already exists. Its current PRD:\n\n${currentPrd || "(no PRD on file; work from the README and the code)"}\n\n\
+The CEO wants these changes:\n${change}\n\n\
+Write the updated PRD in markdown. Keep what still applies, change what the request changes, and add a short \
+"Changes in this version" section at the top listing exactly what is new or different.`;
+}
+
+export function architecturePrompt(prd: string, feedback?: string, existingFiles?: string[]): string {
+  const existing = existingFiles?.length
+    ? `This product already exists. Define ownership areas that fit its current code; do not propose a rewrite.\n\
+Tracked files:\n${existingFiles.map((f) => `- ${f}`).join("\n")}\n\n`
+    : "";
+  return `PRD:\n\n${prd}\n\n${existing}${feedback ? `The CEO rejected your previous proposal. Feedback:\n${feedback}\n\n` : ""}\
+Propose the architecture: a short summary (stack, structure, key decisions) and the ownership areas.
 Finish with a JSON block:
 \`\`\`json
 {"summary": "markdown summary", "areas": [{"id": "web", "name": "Web UI", "paths": ["web/"]}, {"id": "shared", "name": "Shared", "paths": ["package.json"], "shared": true}]}
 \`\`\``;
 }
 
-export function ticketsPrompt(prd: string, architecture: string, areas: Area[]): string {
+export function ticketsPrompt(
+  prd: string,
+  architecture: string,
+  areas: Area[],
+  change?: { request: string; existingFiles: string[] },
+): string {
   const areaList = areas
     .map((a) => `- ${a.id}${a.shared ? " (shared)" : ""}: ${a.paths.join(", ")}`)
     .join("\n");
-  return `PRD:\n\n${prd}\n\nArchitecture:\n\n${architecture}\n\nOwnership areas:\n${areaList}\n\n\
+  const scope = change
+    ? `The product already exists and works. File tickets ONLY for this change request from the CEO; do not \
+rebuild or rewrite existing features. Point each ticket at the existing files it changes where possible.\n\n\
+Change request:\n${change.request}\n\nTracked files:\n${change.existingFiles.map((f) => `- ${f}`).join("\n")}\n\n`
+    : "";
+  return `PRD:\n\n${prd}\n\nArchitecture:\n\n${architecture}\n\nOwnership areas:\n${areaList}\n\n${scope}\
 Break the work into tickets. Finish with a JSON block:
 \`\`\`json
 {"tickets": [{"key": "setup", "title": "...", "description": "...", "acceptance": ["..."], "area": "shared", "files": ["package.json"], "dependsOn": [], "priority": 0, "size": "S"}]}

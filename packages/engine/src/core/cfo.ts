@@ -74,8 +74,14 @@ export function unitsOf(size?: TicketSize): number {
   return SIZE_UNITS[size ?? "M"];
 }
 
+/**
+ * Plans smaller than this many units are priced as if they had this many,
+ * so a one-ticket change can't claim the whole budget.
+ */
+export const MIN_PLAN_UNITS = 10;
+
 /** Dollars per budget unit when `budgetUsd` is split across tickets of these sizes. */
 export function unitPrice(budgetUsd: number, sizes: (TicketSize | undefined)[]): number {
   const units = sizes.reduce((n, s) => n + unitsOf(s), 0);
-  return units > 0 ? (budgetUsd * (1 - RESERVE_SHARE)) / units : 0;
+  return units > 0 ? (budgetUsd * (1 - RESERVE_SHARE)) / Math.max(units, MIN_PLAN_UNITS) : 0;
 }

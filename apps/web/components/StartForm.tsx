@@ -2,6 +2,87 @@
 
 import { useEffect, useState } from "react";
 import { api, type Product, type ServerConfig } from "@/lib/api";
+import { svgUrl } from "@/components/Header";
+
+const LAST_PHASE: Record<string, string> = {
+  shipped: "Shipped",
+  stopped: "Stopped by you",
+  failed: "Stopped on a failure",
+  releasing: "Waiting on the release card",
+};
+
+/** Where the product's last run left off: the reference while you write the next request. */
+function LastRun({ product, onUseBrief }: { product: Product; onUseBrief: (brief: string) => void }) {
+  const last = product.last;
+  if (!last) {
+    return (
+      <div className="last-run">
+        <p className="hint">No saved board for this product yet (it was built before boards were saved). Its code and docs are all there.</p>
+      </div>
+    );
+  }
+  return (
+    <div className="last-run" aria-label="Where it left off">
+      <div className="head">
+        {last.brand && <img src={svgUrl(last.brand.logoSvg)} alt="" width={32} height={32} />}
+        <div>
+          <strong>{last.brand?.name ?? product.name}</strong>
+          <span className="hint">
+            {LAST_PHASE[last.phase] ?? `Was ${last.phase} when it stopped`} · {new Date(last.savedAt).toLocaleString()} · $
+            {last.spentUsd.toFixed(2)} spent
+          </span>
+        </div>
+      </div>
+      <div className="brief-ref">
+        <span className="label">Last brief</span>
+        <p>{last.idea}</p>
+        <button type="button" className="btn btn-quiet link" onClick={() => onUseBrief(last.idea)}>
+          Edit from this brief
+        </button>
+      </div>
+      <p className="counts">
+        <strong>{last.counts.merged}</strong> merged · <strong>{last.counts.open}</strong> unfinished
+        {last.counts.skipped > 0 && (
+          <>
+            {" "}
+            · <strong>{last.counts.skipped}</strong> skipped
+          </>
+        )}
+        {last.lastRelease && (
+          <>
+            {" "}
+            · release {last.lastRelease.status === "approved" ? "approved" : last.lastRelease.status === "pending" ? "waiting" : "held"}
+            {last.lastRelease.feedback && last.lastRelease.status === "rejected" ? `: "${last.lastRelease.feedback}"` : ""}
+          </>
+        )}
+      </p>
+      {last.open.length > 0 && (
+        <div>
+          <span className="label">Unfinished</span>
+          <ul>
+            {last.open.map((t) => (
+              <li key={t.id}>
+                <span className="id">{t.id}</span> {t.title}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {last.recent.length > 0 && (
+        <div>
+          <span className="label">Recently merged</span>
+          <ul>
+            {last.recent.map((t) => (
+              <li key={t.id}>
+                <span className="id">{t.id}</span> {t.title}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export function StartForm({ onCancel }: { onCancel?: () => void }) {
   const [config, setConfig] = useState<ServerConfig | null>(null);
@@ -48,11 +129,13 @@ export function StartForm({ onCancel }: { onCancel?: () => void }) {
   const claude = runner === "claude";
   const showKeyInput = claude && (!config?.hasKey || replacingKey);
   const selectedModel = config?.models.find((m) => m.id === model);
+  const chosen = continuing ? products?.find((p) => p.dir === product) : undefined;
+  const unfinishedCount = chosen?.last?.counts.open ?? 0;
 
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
+  async function submit(e: React.FormEvent | null, resume = false) {
+    e?.preventDefault();
     if (continuing && !product) return setError({ field: "form", message: "Pick the product to continue." });
-    if (idea.trim().length < 3)
+    if (!resume && idea.trim().length < 3)
       return setError({
         field: "idea",
         message: continuing ? "Describe what should change first." : "Describe the product in a sentence or two first.",
@@ -75,8 +158,9 @@ export function StartForm({ onCancel }: { onCancel?: () => void }) {
         }
       }
       await api.start({
-        idea: idea.trim(),
+        idea: resume ? "" : idea.trim(),
         continueFrom: continuing ? product : undefined,
+        resume: resume || undefined,
         runner,
         model: claude ? model : undefined,
         models: claude ? roleModels : undefined,
@@ -142,8 +226,13 @@ export function StartForm({ onCancel }: { onCancel?: () => void }) {
           </fieldset>
         )}
 
+        {chosen && <LastRun product={chosen} onUseBrief={(b) => setIdea(b)} />}
+
         <label>
           {continuing ? "The change" : "The idea"}
+          {continuing && unfinishedCount > 0 && (
+            <span className="hint">The {unfinishedCount} unfinished ticket(s) carry into this run either way.</span>
+          )}
           <textarea
             value={idea}
             onChange={(e) => {
@@ -328,10 +417,15 @@ export function StartForm({ onCancel }: { onCancel?: () => void }) {
         </p>
 
         {error?.field === "form" && <p className="error">{error.message}</p>}
-        <div style={{ display: "flex", gap: 8 }}>
+        <div className="actions">
           <button className="btn btn-primary submit" disabled={busy || !config}>
             {busy ? "Starting..." : continuing ? "Start the change" : "Start the company"}
           </button>
+          {continuing && unfinishedCount > 0 && (
+            <button type="button" className="btn submit" disabled={busy || !config} onClick={() => void submit(null, true)}>
+              Resume the {unfinishedCount} unfinished ticket{unfinishedCount === 1 ? "" : "s"}
+            </button>
+          )}
           {onCancel && (
             <button type="button" className="btn btn-quiet" onClick={onCancel}>
               Back to the board

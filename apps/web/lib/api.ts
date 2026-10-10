@@ -1,3 +1,5 @@
+import type { HistorySummary } from "@agentco/engine";
+
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -20,11 +22,15 @@ export interface Product {
   updatedAt: number;
   commits: number;
   hasPrd: boolean;
+  /** Where the last run left off, if it was saved. */
+  last?: HistorySummary;
 }
 
 export interface StartOptions {
   idea: string;
   continueFrom?: string;
+  /** Pick up the last run's unfinished tickets; no new request needed. */
+  resume?: boolean;
   runner: "mock" | "claude";
   engineersPerArea: number;
   floaters: number;
@@ -75,6 +81,7 @@ export const api = {
   pause: () => post("/api/pause"),
   resume: () => post("/api/resume"),
   requestChange: (request: string) => post("/api/changes", { request }),
+  reviseBrief: (idea: string) => post("/api/brief", { idea }),
   setModels: (models: Record<string, string>) => request<{ models: Record<string, string> }>("PUT", "/api/models", { models }),
   prioritize: (ticketId: string) => post(`/api/tickets/${ticketId}/prioritize`),
   note: (ticketId: string, note: string, redo = false) => post(`/api/tickets/${ticketId}/note`, { note, redo }),

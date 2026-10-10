@@ -405,8 +405,12 @@ describe("changes after the build", () => {
     // Areas came from docs/areas.json: no architecture gate this time.
     expect(second.board.gates.some((g) => g.kind === "architecture")).toBe(false);
     expect(second.board.gates.find((g) => g.kind === "prd")!.title).toBe("Approve the updated PRD");
-    expect(second.board.tickets).toHaveLength(1);
-    expect(second.board.tickets[0]!.kind).toBe("change");
+    // The last run's tickets are back as history; numbering carries on.
+    const current = second.board.tickets.filter((t) => !t.earlier);
+    expect(current).toHaveLength(1);
+    expect(current[0]!.kind).toBe("change");
+    expect(current[0]!.id).toBe("T-7");
+    expect(second.board.tickets.filter((t) => t.earlier)).toHaveLength(6);
     expect(Number(git(v1.dir, "rev-list", "--count", "main").trim())).toBeGreaterThan(Number(commitsBefore));
     expect(readFileSync(join(v1.dir, "web/notes.html"), "utf8")).toContain("Change: Add tags to notes");
     // The brand carries over; the designer updates the existing design for the change.
@@ -546,6 +550,75 @@ describe("CEO controls during the build", () => {
     expect(orch.board.project!.phase).toBe("shipped");
     expect(orch.board.ticket(shell.id).status).toBe("skipped");
     expect(orch.board.tickets.find((t) => t.title === "Login page")!.status).toBe("done");
+  }, 30_000);
+});
+
+describe("picking up where it left off", () => {
+  it("resumes a stopped product's unfinished tickets with no new plan", async () => {
+    const ws = workspace();
+    const first = new Orchestrator(new MockRunner({ stepMs: 25 }), { workspaceDir: ws, autoApprove: "all", tickMs: 5, qaRounds: 0 });
+    first.start("A notes app");
+    await waitFor(() => (first.board.tickets.filter((t) => t.status === "done").length >= 2 ? true : undefined));
+    first.stop();
+    await first.whenIdle();
+    await new Promise((r) => setTimeout(r, 700)); // the board is saved shortly after the last change
+    const dir = first.board.project!.dir;
+    const doneBefore = first.board.tickets.filter((t) => t.status === "done").map((t) => t.id);
+    const engineer = first.board.agents.find((a) => (a.score?.delivered ?? 0) > 0)!;
+
+    const second = new Orchestrator(new MockRunner({ stepMs: 0 }), { workspaceDir: ws, autoApprove: "all", tickMs: 5, qaRounds: 0 });
+    const project = await second.run("", undefined, { existingDir: dir, resume: true });
+    expect(project.phase).toBe("shipped");
+    expect(project.idea).toBe("A notes app");
+    expect(second.board.gates.map((g) => g.kind)).toEqual(["release"]);
+    expect(second.board.tickets).toHaveLength(6);
+    expect(second.board.tickets.every((t) => t.status === "done")).toBe(true);
+    expect(second.board.tickets.filter((t) => t.earlier).map((t) => t.id)).toEqual(doneBefore);
+    expect(second.board.agent(engineer.id).score!.delivered).toBeGreaterThanOrEqual(engineer.score!.delivered);
+    expect(second.board.snapshot().log.some((l) => l.message.startsWith("Picked up from the last run"))).toBe(true);
+  }, 40_000);
+
+  it("refuses to resume when nothing is unfinished", async () => {
+    const ws = workspace();
+    const v1 = await new Orchestrator(new MockRunner({ stepMs: 0 }), { workspaceDir: ws, autoApprove: "all", tickMs: 5, qaRounds: 0 }).run("A notes app");
+    await new Promise((r) => setTimeout(r, 700));
+    const second = new Orchestrator(new MockRunner({ stepMs: 0 }), { workspaceDir: ws, autoApprove: "all", tickMs: 5 });
+    expect(() => second.start("", undefined, { existingDir: v1.dir, resume: true })).toThrow("nothing unfinished");
+  }, 30_000);
+});
+
+describe("revising the brief", () => {
+  it("before the build: closes the open card and replans from the PRD with the new brief", async () => {
+    const orch = new Orchestrator(new MockRunner({ stepMs: 0 }), {
+      workspaceDir: workspace(),
+      autoApprove: ["brand", "design", "architecture", "release"],
+      tickMs: 5,
+      qaRounds: 0,
+    });
+    orch.start("A notes app");
+    const first = await waitFor(() => orch.board.gates.find((g) => g.kind === "prd" && g.status === "pending"));
+    await orch.reviseBrief("A recipe box for home cooks");
+    expect(orch.board.gate(first.id).status).toBe("rejected");
+    const second = await waitFor(() => orch.board.gates.find((g) => g.kind === "prd" && g.status === "pending"));
+    expect(second.content).toContain("A recipe box for home cooks");
+    orch.approve(second.id);
+    await waitFor(() => (orch.board.project!.phase === "shipped" ? true : undefined), 20_000);
+    expect(orch.board.project!.idea).toBe("A recipe box for home cooks");
+  }, 30_000);
+
+  it("during the build: files the difference as change tickets", async () => {
+    const tasks: AgentTask[] = [];
+    const mock = new MockRunner({ stepMs: 10 });
+    const runner: AgentRunner = { name: "spy", run: (t, on, sig) => (tasks.push(t), mock.run(t, on, sig)) };
+    const orch = new Orchestrator(runner, { workspaceDir: workspace(), autoApprove: "all", tickMs: 5, qaRounds: 0 });
+    orch.start("A notes app");
+    await waitFor(() => (orch.board.tickets.some((t) => t.status === "in_progress") ? true : undefined));
+    await orch.reviseBrief("A notes app with tags");
+    await orch.whenIdle();
+    expect(orch.board.project!.phase).toBe("shipped");
+    expect(orch.board.tickets.some((t) => t.kind === "change" && t.status === "done")).toBe(true);
+    const change = tasks.find((t) => t.kind === "tickets" && t.context.changeRequest)!;
+    expect(change.context.changeRequest).toContain("New brief:\nA notes app with tags");
   }, 30_000);
 });
 

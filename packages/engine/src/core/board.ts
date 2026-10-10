@@ -172,6 +172,11 @@ export class Board {
     return `T-${++this.counters.ticket}`;
   }
 
+  /** Keep numbering after tickets from an earlier run, so ids (and branches) never repeat. */
+  bumpTicketCounter(atLeast: number): void {
+    this.counters.ticket = Math.max(this.counters.ticket, atLeast);
+  }
+
   updateTicket(id: string, patch: Partial<Ticket>): Ticket {
     const t = this.ticket(id);
     Object.assign(t, patch, { updatedAt: Date.now() });
@@ -250,6 +255,13 @@ export class Board {
     this.state.log.push(entry);
     if (this.state.log.length > MAX_LOG) this.state.log.splice(0, this.state.log.length - MAX_LOG);
     this.emit({ type: "log", entry });
+  }
+
+  /** Bring back log lines from an earlier run, keeping their times. */
+  importLog(entries: LogEntry[]): void {
+    this.state.log.unshift(...entries);
+    if (this.state.log.length > MAX_LOG) this.state.log.splice(0, this.state.log.length - MAX_LOG);
+    this.emit({ type: "reset", snapshot: this.snapshot() });
   }
 
   // ---- persistence -----------------------------------------------------

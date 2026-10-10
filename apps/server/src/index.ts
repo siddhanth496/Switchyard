@@ -14,6 +14,8 @@ import {
   MockRunner,
   Orchestrator,
   ProjectRepo,
+  readHistory,
+  summarizeHistory,
   type AgentRunner,
   type BoardEvent,
   type Role,
@@ -94,7 +96,9 @@ function keyStatus() {
 }
 
 const StartSchema = z.object({
-  idea: z.string().min(3),
+  idea: z.string().trim().default(""),
+  /** With continueFrom: pick up the last run's unfinished tickets instead of a new request. */
+  resume: z.boolean().optional(),
   /** Folder of an existing product (from GET /api/products) to change instead of starting fresh. */
   continueFrom: z.string().optional(),
   name: z.string().optional(),
@@ -212,7 +216,17 @@ app.get("/api/products", (c) => {
       } catch {
         /* an empty repo */
       }
-      return { dir, folder: dir.split("/").pop()!, name, updatedAt, commits, hasPrd: existsSync(join(dir, "docs/PRD.md")) };
+      const history = readHistory(dir);
+      return {
+        dir,
+        folder: dir.split("/").pop()!,
+        name,
+        updatedAt: Math.max(updatedAt, history?.savedAt ?? 0),
+        commits,
+        hasPrd: existsSync(join(dir, "docs/PRD.md")),
+        // Where the last run left off, for the start screen.
+        last: history ? summarizeHistory(history) : undefined,
+      };
     })
     .sort((a, b) => b.updatedAt - a.updatedAt);
   return c.json({ products, workspace: WORKSPACE });
@@ -220,6 +234,9 @@ app.get("/api/products", (c) => {
 
 app.post("/api/projects", async (c) => {
   const body = StartSchema.parse(await c.req.json());
+  if (!(body.resume && body.continueFrom) && body.idea.length < 3) {
+    return c.json({ error: body.continueFrom ? "Describe what should change." : "Describe the product in a sentence or two." }, 400);
+  }
   if (orch?.isRunning) {
     const stopping = board.project?.phase === "stopped";
     return c.json({ error: stopping ? "The last project is still stopping. Try again in a few seconds." : "A project is already running. Stop it first." }, 409);
@@ -255,7 +272,7 @@ app.post("/api/projects", async (c) => {
     },
     board,
   );
-  const project = orch.start(body.idea, body.name, { existingDir });
+  const project = orch.start(body.idea, body.name, { existingDir, resume: body.resume });
   return c.json({ project, runner: runnerName }, 201);
 });
 
@@ -295,6 +312,13 @@ app.post("/api/pause", (c) => {
 app.post("/api/resume", (c) => {
   requireOrch().resume();
   return c.json({ ok: true });
+});
+
+app.post("/api/brief", async (c) => {
+  const { idea } = z.object({ idea: z.string().trim().min(3, "Write the new brief.") }).parse(await c.req.json());
+  // Checks throw at once; replanning carries on in the background.
+  requireOrch().reviseBrief(idea).catch((err: Error) => board.log("warn", `Couldn't apply the new brief: ${err.message}`));
+  return c.json({ ok: true }, 202);
 });
 
 app.post("/api/changes", async (c) => {

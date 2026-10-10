@@ -7,3 +7,4 @@ export { ClaudeRunner, type ClaudeRunnerOptions } from "./agents/claude.js";
 export { MockRunner, type MockRunnerOptions } from "./agents/mock.js";
 export { ProjectRepo } from "./git/repo.js";
 export { Orchestrator, type OrchestratorConfig } from "./orchestrator/orchestrator.js";
+export { readHistory, summarizeHistory, historyPath, type HistorySummary, type ProductHistory } from "./orchestrator/history.js";

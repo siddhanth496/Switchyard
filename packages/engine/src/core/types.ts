@@ -62,6 +62,8 @@ export interface Ticket {
   noBatch?: boolean;
   /** Notes the CEO added; every attempt's engineer sees them. */
   ceoNotes?: string[];
+  /** Finished in an earlier run of this product; shown as history. */
+  earlier?: boolean;
   costUsd: number;
   createdAt: number;
   updatedAt: number;

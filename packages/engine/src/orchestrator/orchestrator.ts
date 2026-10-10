@@ -52,6 +52,7 @@ import {
 } from "../agents/schemas.js";
 import { ProjectRepo } from "../git/repo.js";
 import { z } from "zod";
+import { lastTicketNumber, readHistory, unfinished, writeHistory, type ProductHistory } from "./history.js";
 import { monogramLogo, paletteSvg, renderBrand, renderDesign, renderLaunch, safeSvg, slugify, toBrand } from "./brand.js";
 
 export interface OrchestratorConfig {
@@ -126,6 +127,14 @@ export class Orchestrator {
   private readonly ticketAborts = new Map<string, AbortController>();
   /** Tickets the CEO interrupted: what to do with them when their run winds down. */
   private readonly interrupted = new Map<string, "redo" | "cancel">();
+  /** Stops saving the board to the product's history file. */
+  private stopSaving: (() => void) | null = null;
+  /** Engineers' scorecards from the product's last run, restored when they're staffed again. */
+  private earlierAgents = new Map<string, Agent>();
+  /** Picking up the last run's unfinished tickets, with no new request. */
+  private resuming = false;
+  /** The CEO rewrote the brief before the build, so the plan restarts from the PRD. */
+  private revisedBrief = false;
   private repo: ProjectRepo | null = null;
   private prd = "";
   private architecture = "";
@@ -193,10 +202,10 @@ export class Orchestrator {
   // ---- public controls -------------------------------------------------
 
   /** Start a new product. Returns at once; the pipeline runs in the background. */
-  start(idea: string, name?: string, opts: { existingDir?: string } = {}): Project {
+  start(idea: string, name?: string, opts: { existingDir?: string; resume?: boolean } = {}): Project {
     if (this.pipeline) throw new Error("A project is already running");
     this.abort = new AbortController();
-    const project = this.setup(idea, name, opts.existingDir);
+    const project = this.setup(idea, name, opts.existingDir, opts.resume);
     this.pipeline = this.runPipeline(idea).finally(() => {
       this.pipeline = null;
     });
@@ -204,7 +213,7 @@ export class Orchestrator {
   }
 
   /** Start and wait for the pipeline to finish (CLI and tests). */
-  async run(idea: string, name?: string, opts: { existingDir?: string } = {}): Promise<Project> {
+  async run(idea: string, name?: string, opts: { existingDir?: string; resume?: boolean } = {}): Promise<Project> {
     this.start(idea, name, opts);
     await this.pipeline;
     if (this.buildLoop) await this.buildLoop;
@@ -314,6 +323,48 @@ export class Orchestrator {
     });
   }
 
+  /**
+   * The CEO rewrites the brief without starting over. Before the build, the
+   * plan restarts from the PRD (the PM updates it from the new brief; an
+   * approved brand is kept). During the build it becomes change tickets for
+   * what's different. While the release card waits, it holds the release.
+   */
+  reviseBrief(brief: string): Promise<void> {
+    const next = brief.trim();
+    const p = this.requireActive();
+    if (next.length < 3) throw new Error("Write the new brief first");
+    if (next === p.idea.trim()) throw new Error("That's the current brief");
+    const previous = p.idea;
+    // An unbranded new product is named after its brief, so the name follows it.
+    const rename = !p.brand && !this.existing ? { name: next.split(/[.\n]/)[0]!.slice(0, 60) } : {};
+    this.board.updateProject({ idea: next, ...rename });
+    if (this.buildLoop) {
+      this.board.log("info", "CEO revised the brief; the task creator is filing tickets for what changed");
+      return this.requestChange(
+        `The CEO revised the product brief. File tickets only for what is different.\n\nOld brief:\n${previous}\n\nNew brief:\n${next}`,
+      ).then(() => undefined);
+    }
+    return this.restartPlan(next);
+  }
+
+  /** Abandon the planning step in progress and plan again from the PRD with the new brief. */
+  private async restartPlan(brief: string): Promise<void> {
+    this.board.log("warn", "CEO revised the brief; the plan restarts from the PRD");
+    this.abort.abort();
+    for (const g of this.board.gates.filter((x) => x.status === "pending")) this.board.resolveGate(g.id, false, "Brief revised");
+    this.gateWaiters.clear();
+    await this.whenIdle();
+    for (const a of this.board.agents.filter((x) => x.status === "working")) {
+      this.board.updateAgent(a.id, { status: "idle", activity: "Brief revised" });
+    }
+    this.abort = new AbortController();
+    this.revisedBrief = true;
+    this.board.updateProject({ phase: "planning" });
+    this.pipeline = this.runPipeline(brief).finally(() => {
+      this.pipeline = null;
+    });
+  }
+
   /** Move a waiting ticket to the front of the queue. */
   prioritize(ticketId: string): Ticket {
     const t = this.board.ticket(ticketId);
@@ -389,7 +440,15 @@ export class Orchestrator {
 
   // ---- pipeline --------------------------------------------------------
 
-  private setup(idea: string, name?: string, existingDir?: string): Project {
+  private setup(idea: string, name?: string, existingDir?: string, resume = false): Project {
+    this.stopSaving?.();
+    this.stopSaving = null;
+    const history = existingDir ? readHistory(existingDir) : undefined;
+    const open = history ? unfinished(history.snapshot.tickets) : [];
+    if (resume && open.length === 0) throw new Error("There's nothing unfinished to resume; describe a change instead");
+    this.resuming = resume;
+    this.revisedBrief = false;
+    if (resume && history?.snapshot.project?.idea) idea = history.snapshot.project.idea;
     this.board.reset();
     this.existing = !!existingDir;
     const existingName = existingDir ? productName(existingDir) : undefined;
@@ -444,14 +503,74 @@ export class Orchestrator {
       this.board.addAgent({ id: IDS.marketing, name: "Marketing lead", role: "marketing", activity: "Name, logo, voice and launch" });
     }
     this.repo = new ProjectRepo(dir);
+    this.earlierAgents = new Map((history?.snapshot.agents ?? []).filter((a) => a.role === "engineer").map((a) => [a.id, a]));
+    if (history) this.carryOver(history, idea);
+    // Save as we go, so the next run can pick up exactly here.
+    let timer: NodeJS.Timeout | null = null;
+    const save = () => {
+      timer = null;
+      try {
+        writeHistory(dir, this.board.snapshot());
+      } catch {
+        /* the folder may not exist yet; the next event retries */
+      }
+    };
+    const off = this.board.on((e) => {
+      // A run that just ended is saved at once, so continuing right away sees it.
+      if (e.type === "project" && e.project && ["shipped", "stopped", "failed"].includes(e.project.phase)) {
+        if (timer) clearTimeout(timer);
+        save();
+      } else if (!timer) {
+        timer = setTimeout(save, 500);
+      }
+    });
+    this.stopSaving = () => {
+      off();
+      if (timer) {
+        clearTimeout(timer);
+        save();
+      }
+    };
     return project;
+  }
+
+  /**
+   * Put the last run's board back: finished tickets as history, unfinished
+   * ones ready to build again (no attempts counted), its recent activity,
+   * and ticket numbers that continue where it stopped.
+   */
+  private carryOver(history: ProductHistory, idea: string): void {
+    const { tickets, log } = history.snapshot;
+    for (const t of tickets) {
+      const finished = t.status === "done" || t.status === "skipped";
+      const { id, ...rest } = t;
+      this.board.addTicket({
+        ...rest,
+        id,
+        ...(finished
+          ? { earlier: true }
+          : { status: "ready", attempts: 0, assignee: undefined, batchWith: undefined, escalated: false, earlier: false }),
+      } as Parameters<Board["addTicket"]>[0]);
+    }
+    this.board.bumpTicketCounter(lastTicketNumber(tickets));
+    this.board.importLog(log.slice(-40));
+    const open = unfinished(tickets).length;
+    this.board.log(
+      "info",
+      `Picked up from the last run (${new Date(history.savedAt).toLocaleString()}): ${tickets.length - open} ticket(s) finished, ${open} unfinished${
+        this.resuming ? "; resuming them" : ` carried into this run. New request: ${idea}`
+      }`,
+    );
   }
 
   private async runPipeline(idea: string): Promise<void> {
     const repo = this.repo!;
     try {
+      if (this.resuming) return await this.resumeBuild();
       if (this.existing) {
-        this.board.log("info", `Continuing ${this.board.project!.name}: ${idea}`);
+        if (!this.revisedBrief) this.board.log("info", `Continuing ${this.board.project!.name}: ${idea}`);
+      } else if (ProjectRepo.isRepo(repo.dir)) {
+        // A revised brief restarts the plan in the repo this run already made.
       } else {
         await repo.init({
           "README.md": `# ${this.board.project!.name}\n\n${idea}\n\nBuilt by an AI software company.\n`,
@@ -463,20 +582,24 @@ export class Orchestrator {
       const existingFiles = this.existing ? await repo.listFiles() : undefined;
 
       // 1. PRD (for an existing product: the PM updates it for the change)
-      const currentPrd = this.existing ? repo.readMain("docs/PRD.md") || repo.readMain("README.md") : "";
+      const currentPrd =
+        this.existing || this.revisedBrief ? repo.readMain("docs/PRD.md") || (this.existing ? repo.readMain("README.md") : "") : "";
+      const updating = !!currentPrd;
       this.prd = await this.untilApproved("prd", async (feedback, previous) => {
         this.board.updateProject({ phase: "planning" });
         const res = await this.runAgent(IDS.pm, {
           kind: "prd",
           systemPrompt: systemPrompts.pm,
-          prompt: this.existing ? prdChangePrompt(currentPrd, idea, feedback, previous) : prdPrompt(idea, feedback, previous),
+          prompt: updating
+            ? prdChangePrompt(currentPrd, this.revisedBrief ? `The CEO rewrote the brief. The new brief, which replaces the old one:\n${idea}` : idea, feedback, previous)
+            : prdPrompt(idea, feedback, previous),
           cwd: repo.dir,
           canWrite: false,
           context: { idea, feedback },
         });
-        return { title: this.existing ? "Approve the updated PRD" : "Approve the PRD", content: res.text, value: res.text };
+        return { title: updating ? "Approve the updated PRD" : "Approve the PRD", content: res.text, value: res.text };
       });
-      await repo.commitToMain({ "docs/PRD.md": this.prd }, this.existing ? "PM: update PRD" : "PM: add PRD");
+      await repo.commitToMain({ "docs/PRD.md": this.prd }, updating ? "PM: update PRD" : "PM: add PRD");
 
       // 2. Brand (marketing), then design (designer, signed off by the PM)
       await this.brandPhase(idea);
@@ -772,16 +895,46 @@ is done: build with this brand.`;
       const members: string[] = [];
       for (let i = 1; i <= this.cfg.engineersPerArea; i++) {
         const id = `eng-${a.id}-${i}`;
-        this.board.addAgent({ id, name: `Engineer ${a.id} ${i}`, role: "engineer", area: a.id, score: emptyScorecard(), standing: "normal" });
+        this.addEngineer(id, `Engineer ${a.id} ${i}`, a.id);
         members.push(id);
       }
       areas.push({ id: a.id, name: a.name, paths: a.paths, lead: members[0]!, members, ...(a.shared ? { shared: true } : {}) });
     }
     for (let i = 1; i <= this.cfg.floaters; i++) {
-      this.board.addAgent({ id: `eng-floater-${i}`, name: `Engineer floater ${i}`, role: "engineer", score: emptyScorecard(), standing: "normal" });
+      this.addEngineer(`eng-floater-${i}`, `Engineer floater ${i}`);
     }
     this.board.setAreas(areas);
     return areas;
+  }
+
+  /** An engineer, with its scorecard from the product's last run if it had one. */
+  private addEngineer(id: string, name: string, area?: string): void {
+    if (this.board.agents.some((a) => a.id === id)) return;
+    const before = this.earlierAgents.get(id);
+    this.board.addAgent({
+      id,
+      name,
+      role: "engineer",
+      ...(area ? { area } : {}),
+      score: before?.score ?? emptyScorecard(),
+      standing: before?.standing === "benched" ? "watch" : (before?.standing ?? "normal"),
+    });
+  }
+
+  /** Pick up the last run's unfinished tickets: no new plan, straight to the build. */
+  private async resumeBuild(): Promise<void> {
+    const repo = this.repo!;
+    const arch = savedAreas(repo.readMain("docs/areas.json"));
+    if (!arch) throw new Error("This product has no saved ownership areas (docs/areas.json), so it can't resume; describe a change instead");
+    this.prd = repo.readMain("docs/PRD.md");
+    this.architecture = arch.summary;
+    const brand = savedBrand(repo.readMain("docs/brand/brand.json"));
+    if (brand) await this.applyBrand(brand);
+    this.designDoc = repo.readMain("docs/design/DESIGN.md");
+    this.staffAreas(arch);
+    this.allocateBudgets();
+    this.board.updateProject({ phase: "building" });
+    await this.ensureBuildLoop();
   }
 
   private createTickets(planned: { key: string; title: string; description: string; acceptance: string[]; area?: string; files: string[]; dependsOn: string[]; priority: number; size?: TicketSize }[], areas: Area[], kind?: "change"): number {
@@ -1160,7 +1313,7 @@ Found by the designer in design review round ${round} (${bug.severity}). Follow 
         (t) =>
           t.status === "done" && t.kind !== "bug" && t.kind !== "design" && t.assignee && anyOverlap(t.changedFiles ?? t.files, files),
       );
-    if (!culprit?.assignee) return;
+    if (!culprit?.assignee || !this.board.agents.some((a) => a.id === culprit.assignee)) return;
     this.score(culprit.assignee, POINTS.bugTraced, { bugs: 1 }, `QA traced "${title}" to ${culprit.id}`);
   }
 
@@ -1175,7 +1328,8 @@ Found by the designer in design review round ${round} (${bug.severity}). Follow 
       );
     }
     const log = await this.repo!.log(50);
-    const tickets = this.board.tickets;
+    // This run's work; tickets finished in earlier runs are history.
+    const tickets = this.board.tickets.filter((t) => !t.earlier);
     const merged = tickets.filter((t) => t.status === "done");
     const skipped = tickets.filter((t) => t.status === "skipped");
     const bugsFixed = tickets.filter((t) => t.kind === "bug" && t.status === "done").length;

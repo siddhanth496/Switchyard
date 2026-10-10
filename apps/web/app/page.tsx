@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Activity } from "@/components/Activity";
 import { Board } from "@/components/Board";
+import { Brief } from "@/components/Brief";
 import { Controls } from "@/components/Controls";
 import { Decision } from "@/components/Decision";
 import { Header } from "@/components/Header";
@@ -30,8 +31,10 @@ export default function Home() {
     return <StartForm onCancel={state.project ? () => setStarting(false) : undefined} />;
   }
 
-  const total = state.tickets.length;
-  const merged = state.tickets.filter((t) => t.status === "done").length;
+  // This run's tickets; ones finished in earlier runs are history.
+  const current = state.tickets.filter((t) => !t.earlier);
+  const total = current.length;
+  const merged = current.filter((t) => t.status === "done").length;
   const waiting = state.gates.some((g) => g.status === "pending");
   const phase = state.project.phase;
   const live = !["shipped", "failed", "stopped"].includes(phase);
@@ -73,6 +76,7 @@ export default function Home() {
         onPause={() => void api.pause()}
         onResume={() => void api.resume()}
       />
+      <Brief project={state.project} releasePending={state.gates.some((g) => g.kind === "release" && g.status === "pending")} />
       <Decision gates={state.gates} />
       {steering && <Controls project={state.project} />}
       <div className="floor">

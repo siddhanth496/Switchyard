@@ -35,6 +35,7 @@ Pick **Demo agents** in the UI to watch the flow for free, or **Claude agents** 
 
 You aren't limited to the decision cards:
 
+- **Edit the brief** (the bar under the header, always showing the brief the team is working from): change the prompt at any point instead of going back to the start screen. Before the build, the step in progress stops and the PM rewrites the PRD from the new brief, and the plan restarts from there (an approved brand is kept). During the build, the task creator files tickets for whatever the new brief changes. While the release card is waiting, it holds the release.
 - **Pause / Resume** (header): running tickets finish, nothing new starts, and QA and the release wait, until you resume.
 - **Stop** (header): stops at once. Running agents are aborted, waiting decision cards close, and tickets that were mid-build go back on the board with no attempt or penalty counted. Pick the product up later with *Continue a product*.
 - **Ask for a change** (the bar above the board): type a change at any point in the build. The task creator files tickets for it straight away, and they're built and tested before the release. While the release card is waiting, a change request holds the release with that feedback.
@@ -62,6 +63,7 @@ Both teams are on by default; untick them on the start screen (or pass `--no-mar
 ### Changing a product
 
 - **Hold the release with feedback** ("Request changes" on the release card): the task creator turns your note into change tickets, the team builds them, QA re-tests, and the release card comes back as round 2.
+- **Pick up where it left off:** every product's board is saved as it runs, next to its repo (`<product>.board.json`, never committed). Choosing *Continue a product* shows where the last run stopped: its brief (with *Edit from this brief*), what merged, what's unfinished and the last release. *Resume the unfinished tickets* goes straight back to building them with no new plan. A new request carries the unfinished tickets along too. The board opens with the last run's tickets folded under *Earlier runs*, engineers keep their CFO scorecards, and ticket numbers carry on, so branches from earlier runs never clash.
 - **Continue a product later:** on the start screen choose *Continue a product*, pick one from your workspace and describe the change. The PM updates the PRD (you approve it), the team reuses the product's saved ownership areas (`docs/areas.json`), builds only the change, QA tests it, and you approve the release. Products built before areas were saved get a quick architecture pass from the tech lead first.
 - Change tickets are priced at the plan's rates, and small plans are priced as if they had 10 budget units, so one small change can't claim the whole budget.
 

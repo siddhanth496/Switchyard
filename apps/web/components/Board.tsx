@@ -193,6 +193,35 @@ function TicketCard({
   );
 }
 
+/** Tickets finished in earlier runs of this product, folded away by default. */
+function EarlierRuns({ tickets }: { tickets: Ticket[] }) {
+  const [open, setOpen] = useState(false);
+  const merged = tickets.filter((t) => t.status === "done").length;
+  return (
+    <div className="column earlier">
+      <header>
+        <h3>Earlier runs</h3>
+        <span>{tickets.length}</span>
+      </header>
+      <p className="empty">
+        {merged} merged{tickets.length > merged ? `, ${tickets.length - merged} skipped` : ""} before this run.
+      </p>
+      <button type="button" className="ticket-more" onClick={() => setOpen((v) => !v)}>
+        {open ? "Hide" : "Show them"}
+      </button>
+      {open && (
+        <ul className="earlier-list">
+          {[...tickets].sort((a, b) => b.updatedAt - a.updatedAt).map((t) => (
+            <li key={t.id} className={t.status === "skipped" ? "skipped" : ""}>
+              <span className="id">{t.id}</span> {t.title.replace(/^(Bug|Change|Design): /, "")}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 export function Board({
   tickets,
   agents,
@@ -205,12 +234,16 @@ export function Board({
   /** The build is live, so the CEO can steer tickets. */
   active?: boolean;
 }) {
+  // Cards look up dependencies across every run; columns show this run's.
+  const all = tickets;
+  const earlier = tickets.filter((t) => t.earlier);
+  tickets = tickets.filter((t) => !t.earlier);
   const shown = (c: { statuses: TicketStatus[] }) => tickets.some((t) => c.statuses.includes(t.status));
   const [needsYou, skipped] = EXTRA_COLUMNS as [(typeof EXTRA_COLUMNS)[number], (typeof EXTRA_COLUMNS)[number]];
   // Failures come first: they are waiting on you.
   const columns = [...(shown(needsYou) ? [needsYou] : []), ...COLUMNS, ...(shown(skipped) ? [skipped] : [])];
 
-  if (tickets.length === 0) {
+  if (tickets.length === 0 && earlier.length === 0) {
     return (
       <section className="board" aria-label="Job board">
         <div className="column">
@@ -234,11 +267,12 @@ export function Board({
             </header>
             {items.length === 0 && <p className="empty">{col.empty}</p>}
             {items.map((t) => (
-              <TicketCard key={t.id} ticket={t} tickets={tickets} agents={agents} areas={areas} active={active} />
+              <TicketCard key={t.id} ticket={t} tickets={all} agents={agents} areas={areas} active={active} />
             ))}
           </div>
         );
       })}
+      {earlier.length > 0 && <EarlierRuns tickets={earlier} />}
     </section>
   );
 }

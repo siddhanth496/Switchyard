@@ -808,6 +808,14 @@ h3 {
   color: var(--fail);
   font-size: 14px;
 }
+.start .actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.start .actions .btn {
+  white-space: nowrap;
+}
 .start .submit {
   justify-self: start;
   padding: 11px 20px;
@@ -992,6 +1000,126 @@ h3 {
   }
   .controls .change {
     grid-template-columns: 1fr;
+  }
+}
+
+/* ---- brief and history ------------------------------------------------- */
+
+.brief {
+  margin: 16px 28px 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.brief .label,
+.last-run .label {
+  flex: none;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--faint);
+}
+.brief > p {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 14px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.brief.editing {
+  display: grid;
+  gap: 8px;
+}
+.brief textarea {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  min-height: 80px;
+  resize: vertical;
+}
+.brief .hint {
+  margin: 0;
+  font-size: 13px;
+  color: var(--muted);
+}
+.brief .row {
+  display: flex;
+  gap: 8px;
+}
+.brief .error {
+  margin: 0;
+  color: var(--fail);
+  font-size: 13px;
+}
+.last-run {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: var(--surface-2);
+  display: grid;
+  gap: 10px;
+  font-size: 14px;
+}
+.last-run .head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.last-run .head img {
+  border-radius: 7px;
+}
+.last-run .head div {
+  display: grid;
+}
+.last-run .brief-ref p {
+  margin: 2px 0 0;
+  white-space: pre-wrap;
+}
+.last-run .counts {
+  margin: 0;
+  color: var(--muted);
+}
+.last-run ul,
+.earlier-list {
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 2px;
+  max-height: 160px;
+  overflow: auto;
+}
+.last-run .id,
+.earlier-list .id {
+  font-size: 12px;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+  margin-right: 4px;
+}
+.column.earlier {
+  opacity: 0.85;
+}
+.earlier-list {
+  font-size: 13px;
+  max-height: 420px;
+}
+.earlier-list li.skipped {
+  color: var(--faint);
+  text-decoration: line-through;
+}
+@media (max-width: 640px) {
+  .brief {
+    margin-left: 16px;
+    margin-right: 16px;
+    flex-wrap: wrap;
   }
 }
 

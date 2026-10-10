@@ -1,0 +1,20 @@
+{
+  "name": "agent-company",
+  "private": true,
+  "version": "0.1.0",
+  "description": "An AI software company: role agents coordinated through a job board, with you as CEO.",
+  "type": "module",
+  "packageManager": "pnpm@10.0.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "pnpm -r build",
+    "test": "pnpm --filter @agentco/engine test",
+    "typecheck": "pnpm -r typecheck",
+    "demo": "pnpm --filter @agentco/engine demo",
+    "server": "pnpm --filter @agentco/server dev",
+    "web": "pnpm --filter @agentco/web dev",
+    "dev": "pnpm --parallel --filter @agentco/server --filter @agentco/web dev"
+  }
+}

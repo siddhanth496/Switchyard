@@ -68,7 +68,7 @@ export class ProjectRepo {
   }
 
   /** Write files on main and commit them, serialized with merges. */
-  commitToMain(files: Record<string, string>, message: string): Promise<void> {
+  commitToMain(files: Record<string, string | Buffer>, message: string): Promise<void> {
     return this.mainLock.run(async () => {
       for (const [path, content] of Object.entries(files)) {
         const abs = join(this.dir, path);

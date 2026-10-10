@@ -7,7 +7,8 @@ idea → PRD (you approve) → brand: name, logo, voice (you approve)
      → design system + key screens, checked by the PM for feasibility (you approve)
      → architecture + ownership areas (you approve)
      → tagged tickets → parallel build in git worktrees → review → merge
-     → QA tests the build, files bugs as tickets, re-tests
+     → QA tests the build and the designer screenshots the running screens;
+       both file what they find as tickets, then re-test
      → marketing writes the launch copy → release (you approve)
 ```
 
@@ -38,7 +39,9 @@ Both teams are on by default; untick them on the start screen (or pass `--no-mar
 - **Design**: the designer turns the PRD and brand into a small design system (tokens as CSS custom properties, the few components the screens need) and the key screens with their empty, loading and error states, plus wireframes for up to 3 screens.
 - **The PM has the final call on design feasibility.** Every design goes to the PM before it reaches you. The PM checks each screen serves a user story, nothing exceeds the PRD's scope or a day's build, and the required states are covered, and either signs it off or sends it back with notes. After 2 rounds (`designRounds`), the PM decides: anything still out of reach is listed as a binding cut. If you ask for design changes, the revision goes through the PM again.
 - The approved design lives in `docs/design/` (`DESIGN.md`, `tokens.css`, `wireframes/`). The tech lead and task creator plan from it (including the PM's cuts), the task creator adds an early ticket that brings the tokens into the app, and engineers, the reviewer and QA check UI work against it.
-- **Continuing a product** keeps its brand and name. If it has a design, the designer updates it for the change and the PM checks it again.
+- **The designer reviews the running app before release.** Each QA round, the designer starts the app, screenshots every screen at phone and desktop size (`npx playwright screenshot`; the first run downloads Chromium once), looks at them against the design, and files what a customer would notice as *Design* tickets: unstyled pages, browser-default links, duplicated navigation, broken layout, missing states. The engineer who merged the screen loses points, as with QA bugs. Issues still visible after the last round are listed on the release card.
+- **You see what you're shipping.** The release card shows the designer's latest screenshots (click to enlarge), and they're committed to `docs/screens/`. If the designer couldn't run the app, the card says nobody has seen the screens.
+- **Continuing a product** keeps its brand and name. If it has a design, the designer updates it for the change and the PM checks it again. A product built before these teams existed gets a brand (marketing keeps the name unless it's a placeholder) and a first design covering all its screens, and the task creator files tickets to restyle every existing screen to match.
 
 ### Changing a product
 

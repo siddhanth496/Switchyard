@@ -48,8 +48,8 @@ export interface Ticket {
   failures?: string[];
   /** True when the next attempt goes to the tech lead. */
   escalated?: boolean;
-  /** "bug" for tickets QA filed, "change" for changes the CEO asked for. */
-  kind?: "feature" | "bug" | "change";
+  /** "bug" for tickets QA filed, "design" for the designer's review of the running app, "change" for changes the CEO asked for. */
+  kind?: "feature" | "bug" | "design" | "change";
   /** Size the task creator gave it; the CFO budgets by size. */
   size?: TicketSize;
   /** What the CFO allotted for building it, in USD. */
@@ -150,10 +150,14 @@ export interface Gate {
   resolvedAt?: number;
 }
 
-/** An SVG shown on a decision card. Rendered as an image, so scripts in it never run. */
+/**
+ * A picture on a decision card: an SVG (logo, wireframe) or a PNG
+ * screenshot as base64. Rendered as an image, so scripts in it never run.
+ */
 export interface GateImage {
   title: string;
-  svg: string;
+  svg?: string;
+  png?: string;
 }
 
 /** What marketing decided, once the CEO approved it. */

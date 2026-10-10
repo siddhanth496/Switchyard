@@ -80,7 +80,7 @@ function makeRunner(kind: "mock" | "claude", model: string, budgetUsd: number): 
   if (kind === "mock") {
     // MOCK_FAIL="App shell" makes that demo ticket always fail, to try the failure flow.
     const failBuildsOf = process.env.MOCK_FAIL ? process.env.MOCK_FAIL.split(",") : [];
-    return new MockRunner({ stepMs: 400, rejectFirstReviewOf: ["Notes CRUD API"], failBuildsOf, qaFindsBugOnce: true, pmPushesBackDesign: "once" });
+    return new MockRunner({ stepMs: 400, rejectFirstReviewOf: ["Notes CRUD API"], failBuildsOf, qaFindsBugOnce: true, pmPushesBackDesign: "once", designFindsIssueOnce: true });
   }
   // Cap any single task at a quarter of the budget (min $0.50), so one
   // runaway agent can't blow through it before the CFO gate trips.

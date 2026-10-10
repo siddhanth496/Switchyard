@@ -44,10 +44,11 @@ function TicketCard({
           {ticket.id}
           {ticket.kind === "bug" && <span className="bug-tag">Bug</span>}
           {ticket.kind === "change" && <span className="change-tag">Change</span>}
+          {ticket.kind === "design" && <span className="design-tag">Design</span>}
         </span>
         <span>{area?.name ?? ticket.area}</span>
       </div>
-      <div className="title">{ticket.title.replace(/^(Bug|Change): /, "")}</div>
+      <div className="title">{ticket.title.replace(/^(Bug|Change|Design): /, "")}</div>
       <ul className="files" aria-label="Files">
         {ticket.files.slice(0, 4).map((f) => (
           <li key={f}>{f}</li>

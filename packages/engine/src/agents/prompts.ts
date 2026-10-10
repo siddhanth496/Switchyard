@@ -32,6 +32,32 @@ Finish with a JSON block:
 {"verdict": "feasible" | "changes", "notes": "what must change, or why it is feasible", "cuts": ["..."]}
 \`\`\``,
 
+  design_reviewer: `${COMPANY}
+
+Role: Product Designer, reviewing the running product before release. You look at the real screens, not the code. \
+You never fix code.
+How to review:
+- Read docs/design/DESIGN.md, docs/design/tokens.css and docs/brand/BRAND.md, then the README to see how to start the app.
+- Install and start the app. Stop any server you start before you finish.
+- Screenshot every screen in the design, and any other page you can reach, at phone size and desktop size:
+  npx -y playwright@1 screenshot --viewport-size=390,844 --wait-for-timeout=800 <url> .switchyard/screens/<screen>-phone.png
+  npx -y playwright@1 screenshot --viewport-size=1280,800 --wait-for-timeout=800 <url> .switchyard/screens/<screen>-desktop.png
+  If the browser is missing, run "npx -y playwright@1 install chromium" once. Save screenshots ONLY in .switchyard/screens/.
+- Open each screenshot with the Read tool and look at it carefully, as a customer would.
+Report what a customer would notice. These are always bugs, high severity:
+- Pages or parts of pages left unstyled: browser-default fonts, blue or purple underlined links, bare bullet lists \
+used as navigation, default form controls next to styled ones.
+- Navigation that is duplicated, missing or inconsistent between screens.
+- Broken layout: overlapping or cut-off content, horizontal scrolling on a phone, misaligned label/value pairs.
+- Placeholder or debug text, missing empty/loading/error states the design asks for.
+Medium: colors, type or spacing that ignore the tokens; copy that ignores the brand's name or voice. Skip tiny \
+pixel differences. If you could not start the app or take screenshots, say exactly why in the summary and review \
+the markup and CSS against the design instead.
+Finish with a JSON block:
+\`\`\`json
+{"verdict": "pass" | "bugs", "summary": "which screens you checked and how", "bugs": [{"title": "...", "description": "what is wrong, on which screen", "steps": ["open /today on a phone"], "expected": "what the design calls for", "files": ["web/src/pages/Today.tsx"], "severity": "high" | "medium" | "low"}]}
+\`\`\``,
+
   marketing: `${COMPANY}
 
 Role: Head of Marketing. You decide how the product is branded: its name, tagline, positioning, voice, \
@@ -171,11 +197,17 @@ export function ticketsPrompt(
   areas: Area[],
   change?: { request: string; existingFiles: string[] },
   design?: string,
+  /** The design was just created for an existing product: its screens need restyling too. */
+  designIsNew?: boolean,
 ): string {
+  const restyle = change && designIsNew
+    ? "This design is new for the product: besides the change, file tickets that restyle EVERY existing screen to match it \
+(tokens, components, navigation), one ticket per screen or small group of screens, all depending on the tokens ticket. "
+    : "";
   const ui = design
     ? `Approved design (docs/design/DESIGN.md):\n\n${design}\n\n\
 Design rules for tickets: build the screens and states above, and nothing the PM cut. \
-${change ? "" : "File one early S ticket in the UI area that brings docs/design/tokens.css into the app's styles; UI tickets depend on it. "}\
+${!change || designIsNew ? "File one early S ticket in the UI area that brings docs/design/tokens.css into the app's styles; UI tickets depend on it. " : ""}${restyle}\
 Put the design's acceptance (states, components) into each UI ticket's acceptance criteria.\n\n`
     : "";
   const areaList = areas
@@ -306,11 +338,16 @@ ${clipped}
 \`\`\``;
 }
 
-export function brandPrompt(idea: string, prd: string, feedback?: string, previous?: string): string {
+export function brandPrompt(idea: string, prd: string, feedback?: string, previous?: string, currentName?: string): string {
+  const existing = currentName
+    ? `\nThis product already exists and is currently called "${currentName}". Keep that name if it works as a brand; \
+propose a new one if it is a placeholder (a description of the idea, a folder name) or doesn't fit. Either way, give it \
+the full brand: tagline, voice, colors and logo.\n`
+    : "";
   const redo = feedback
     ? `\nThe CEO sent back your last proposal.\n\nCEO feedback:\n${feedback}\n${previous ? `\nYour last proposal:\n${previous}\n` : ""}`
     : "";
-  return `The CEO's idea:\n${idea}\n\nPRD:\n${prd}\n${redo}
+  return `The CEO's ${currentName ? "change request" : "idea"}:\n${idea}\n\nPRD:\n${prd}\n${existing}${redo}
 Brand the product. Finish with a JSON block:
 \`\`\`json
 {"name": "...", "alternatives": [{"name": "...", "why": "..."}], "tagline": "...", "positioning": "who it is for and why it beats the alternative, in 2 sentences", "audience": "...", "voice": ["Plain words: say 'Add a habit', not 'Create new entity'"], "avoid": ["..."], "palette": [{"name": "Primary", "hex": "#3346d3", "use": "buttons, links"}], "typography": {"heading": "a free font or system stack", "body": "..."}, "logoSvg": "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'>...</svg>", "logoNotes": "what the mark means"}
@@ -320,12 +357,25 @@ Brand the product. Finish with a JSON block:
 export function designPrompt(
   prd: string,
   brand: string,
-  opts: { feedback?: string; pmNotes?: string; previous?: string; current?: string; change?: string } = {},
+  opts: {
+    feedback?: string;
+    pmNotes?: string;
+    previous?: string;
+    current?: string;
+    change?: string;
+    /** Set for an existing product that has no design yet. */
+    existingFiles?: string[];
+  } = {},
 ): string {
   const base = opts.current
     ? `This product already has a design (docs/design/DESIGN.md):\n\n${opts.current}\n\nUpdate it for this change from the CEO, \
 keeping everything else as it is:\n${opts.change ?? ""}\n\nReturn the full updated design.\n`
-    : "";
+    : opts.existingFiles
+      ? `This product already exists but has never had a design: its screens were built without one. Read its UI code to \
+see which screens exist, then design the system for ALL of them plus this change from the CEO:\n${opts.change ?? ""}\n\
+Engineers will restyle the existing screens to match, so cover every screen, including navigation.\nTracked files:\n\
+${opts.existingFiles.map((f) => `- ${f}`).join("\n")}\n`
+      : "";
   const ceo = opts.feedback ? `\nThe CEO sent back your last design.\n\nCEO feedback:\n${opts.feedback}\n` : "";
   const pm = opts.pmNotes
     ? `\nThe PM reviewed your design for feasibility and asked for changes. The PM has the final call on scope:\n${opts.pmNotes}\n`
@@ -355,4 +405,26 @@ Write the launch copy in the brand's voice${change ? " for this update" : ""}. O
 \`\`\`json
 {"headline": "...", "description": "one paragraph for a store listing or landing page", "highlights": ["..."], "announcement": "a short post announcing it, in markdown"}
 \`\`\``;
+}
+
+export function designReviewPrompt(
+  prd: string,
+  areas: Area[],
+  round: number,
+  earlier: { title: string; fixed: boolean }[],
+): string {
+  const areaList = areas.map((a) => `- ${a.id}: ${a.paths.join(", ")}`).join("\n");
+  const previous = earlier.length
+    ? `\nThis is design review round ${round}. Issues from earlier rounds (check the fixed ones; don't re-report a fixed one unless it is still visible):
+${earlier.map((b) => `- ${b.title}${b.fixed ? " (marked fixed)" : " (still open)"}`).join("\n")}
+`
+    : "";
+  return `Review the running product on main against the design before it ships.
+
+PRD:
+${prd}
+
+Code areas (use these paths when you name the files at fault):
+${areaList}
+${previous}`;
 }

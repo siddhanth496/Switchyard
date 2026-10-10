@@ -486,6 +486,64 @@ describe("marketing and design", () => {
     expect(project.brand?.logoSvg).toContain(">J</text>");
   }, 30_000);
 
+  it("has the designer look at the running app, fix what a customer would see, and show you the screens", async () => {
+    const orch = new Orchestrator(new MockRunner({ stepMs: 0, designFindsIssueOnce: true }), {
+      workspaceDir: workspace(),
+      autoApprove: "all",
+      tickMs: 5,
+    });
+    const project = await orch.run("A notes app");
+    expect(project.phase).toBe("shipped");
+
+    const fix = orch.board.tickets.find((t) => t.kind === "design")!;
+    expect(fix.title).toBe("Design: Navigation links are unstyled");
+    expect(fix.status).toBe("done");
+    expect(fix.priority).toBe(0);
+    // The engineer who merged the unstyled screen is penalized.
+    const shell = orch.board.tickets.find((t) => t.title === "App shell and styles")!;
+    expect(orch.board.agent(shell.assignee!).score!.bugs).toBe(1);
+
+    const release = orch.board.gates.find((g) => g.kind === "release")!;
+    expect(release.content).toContain("**Design review:** passed, after fixing 1 issue(s)");
+    expect(release.images?.map((i) => i.title)).toEqual(["notes-list-phone", "sign-in-phone"]);
+    expect(release.images?.[0]?.svg).toMatch(/^<svg/);
+    expect(readFileSync(join(project.dir, "docs/screens/notes-list-phone.svg"), "utf8")).toMatch(/^<svg/);
+  }, 30_000);
+
+  it("warns on the release card when nobody could see the screens", async () => {
+    const orch = new Orchestrator(new MockRunner({ stepMs: 0, noScreenshots: true }), {
+      workspaceDir: workspace(),
+      autoApprove: "all",
+      tickMs: 5,
+      qaRounds: 1,
+    });
+    await orch.run("A notes app");
+    const release = orch.board.gates.find((g) => g.kind === "release")!;
+    expect(release.content).toContain("**No screenshots:**");
+    expect(release.images).toBeUndefined();
+  }, 30_000);
+
+  it("brands and designs an existing product that was built without them, and restyles its screens", async () => {
+    const ws = workspace();
+    const plain = { workspaceDir: ws, autoApprove: "all" as const, tickMs: 5, qaRounds: 0 };
+    const v1 = await new Orchestrator(new MockRunner({ stepMs: 0 }), { ...plain, marketing: false, design: false }).run("A notes app");
+    expect(v1.brand).toBeUndefined();
+
+    const tasks: AgentTask[] = [];
+    const mock = new MockRunner({ stepMs: 0 });
+    const runner: AgentRunner = { name: "spy", run: (t, on, sig) => (tasks.push(t), mock.run(t, on, sig)) };
+    const second = new Orchestrator(runner, plain);
+    const v2 = await second.run("Add tags to notes", undefined, { existingDir: v1.dir });
+    expect(v2.phase).toBe("shipped");
+    expect(second.board.gates.some((g) => g.kind === "brand")).toBe(true);
+    expect(tasks.find((t) => t.kind === "brand")!.prompt).toContain(`currently called "${v1.name}"`);
+    expect(v2.brand?.name).toBe("Jotter");
+    expect(second.board.gates.find((g) => g.kind === "design")!.title).toBe("Approve the design");
+    expect(tasks.find((t) => t.kind === "design")!.prompt).toContain("has never had a design");
+    expect(tasks.find((t) => t.kind === "tickets")!.prompt).toContain("restyle EVERY existing screen");
+    expect(readFileSync(join(v1.dir, "docs/design/DESIGN.md"), "utf8")).toContain("# Design");
+  }, 40_000);
+
   it("can run without marketing and design", async () => {
     const orch = new Orchestrator(new MockRunner({ stepMs: 0 }), {
       workspaceDir: workspace(),

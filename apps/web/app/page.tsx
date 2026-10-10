@@ -44,7 +44,10 @@ export default function Home() {
         architecture: "Tech lead is designing the architecture",
         ticketing: "Task creator is filing tickets",
         building: `${merged} of ${total} tickets merged`,
-        testing: "QA is testing the build",
+        testing:
+          state.agents.find((a) => a.id === "designer")?.status === "working"
+            ? "Designer is reviewing the running screens"
+            : "QA is testing the build",
         paused: "Paused at the budget",
         releasing: "Ready to release",
         shipped: merged === total ? `Shipped with all ${total} tickets merged` : `Shipped with ${merged} of ${total} tickets merged`,

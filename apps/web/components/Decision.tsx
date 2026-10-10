@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Gate } from "@agentco/engine";
@@ -33,6 +33,14 @@ export function Decision({ gates }: { gates: Gate[] }) {
   const [feedback, setFeedback] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [zoom, setZoom] = useState<{ src: string; title: string } | null>(null);
+
+  useEffect(() => {
+    if (!zoom) return;
+    const close = (e: KeyboardEvent) => e.key === "Escape" && setZoom(null);
+    window.addEventListener("keydown", close);
+    return () => window.removeEventListener("keydown", close);
+  }, [zoom]);
 
   const gate = pending[0];
   if (!gate) {
@@ -105,13 +113,18 @@ export function Decision({ gates }: { gates: Gate[] }) {
         <h2 id="decision-title">{gate.title}</h2>
         <p className="who">{FROM[gate.kind]}</p>
         {gate.images && gate.images.length > 0 && (
-          <div className={`gate-images ${gate.kind === "brand" ? "logo" : ""}`}>
-            {gate.images.map((img) => (
-              <figure key={img.title}>
-                <img src={svgUrl(img.svg)} alt={img.title} />
-                <figcaption>{img.title}</figcaption>
-              </figure>
-            ))}
+          <div className={`gate-images ${gate.kind === "brand" ? "logo" : gate.kind === "release" ? "screens" : ""}`}>
+            {gate.images.map((img) => {
+              const src = img.png ? `data:image/png;base64,${img.png}` : svgUrl(img.svg ?? "");
+              return (
+                <figure key={img.title}>
+                  <button type="button" className="zoomable" onClick={() => setZoom({ src, title: img.title })} aria-label={`Enlarge ${img.title}`}>
+                    <img src={src} alt={img.title} />
+                  </button>
+                  <figcaption>{img.title}</figcaption>
+                </figure>
+              );
+            })}
           </div>
         )}
         <div className="doc">
@@ -123,6 +136,12 @@ export function Decision({ gates }: { gates: Gate[] }) {
         {error && <p className="error">{error}</p>}
         {pending.length > 1 && <p className="queue">{pending.length - 1} more waiting after this one.</p>}
       </div>
+      {zoom && (
+        <div className="zoom" role="dialog" aria-label={zoom.title} onClick={() => setZoom(null)}>
+          <img src={zoom.src} alt={zoom.title} />
+          <p>{zoom.title} · click anywhere or press Esc to close</p>
+        </div>
+      )}
     </section>
   );
 }

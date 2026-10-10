@@ -21,6 +21,10 @@ export interface MockRunnerOptions {
   pmPushesBackDesign?: "once" | "always";
   /** Marketing's logo is not a usable SVG, to test the fallback. */
   brokenLogo?: boolean;
+  /** The designer's review of the running app finds one issue in its first round. */
+  designFindsIssueOnce?: boolean;
+  /** The designer can't take screenshots (no browser). */
+  noScreenshots?: boolean;
 }
 
 /**
@@ -42,8 +46,12 @@ export class MockRunner implements AgentRunner {
   private readonly buildCost: number;
   private readonly pmPushback?: "once" | "always";
   private readonly brokenLogo: boolean;
+  private readonly designFindsIssueOnce: boolean;
+  private readonly noScreenshots: boolean;
 
   constructor(options: MockRunnerOptions = {}) {
+    this.designFindsIssueOnce = options.designFindsIssueOnce ?? false;
+    this.noScreenshots = options.noScreenshots ?? false;
     this.pmPushback = options.pmPushesBackDesign;
     this.brokenLogo = options.brokenLogo ?? false;
     this.overspendOnce = options.overspendFirstBuildOf ?? [];
@@ -104,6 +112,40 @@ export class MockRunner implements AgentRunner {
             : { verdict: "changes", notes: "Offline sync isn't in the PRD and won't fit in a day.", cuts: ["Offline mode"] }
           : { verdict: "feasible", notes: "Every screen maps to a user story and fits v1.", cuts: [] };
         return ok(`\`\`\`json\n${JSON.stringify(review)}\n\`\`\``, 0.005);
+      }
+      case "design_review": {
+        const round = task.context.qaRound ?? 1;
+        await step("Starting the app");
+        if (!this.noScreenshots) {
+          const dir = join(task.cwd, ".switchyard/screens");
+          mkdirSync(dir, { recursive: true });
+          for (const [name, title] of [["sign-in-phone", "Sign in"], ["notes-list-phone", "Notes"]] as const) {
+            await step(`Screenshot: ${name}`);
+            writeFileSync(join(dir, `${name}.svg`), MOCK_SCREENSHOT(title, round));
+          }
+          await step("Looking at the screenshots against the design");
+        }
+        const bugs =
+          this.designFindsIssueOnce && round === 1
+            ? [
+                {
+                  title: "Navigation links are unstyled",
+                  description: "On the notes list, the nav shows browser-default purple underlined links instead of the tab bar.",
+                  steps: ["Open the notes list on a phone"],
+                  expected: "The tab bar from the design, using --color-primary for the active tab",
+                  files: ["web/styles.css"],
+                  severity: "high",
+                },
+              ]
+            : [];
+        const report = {
+          verdict: bugs.length ? "bugs" : "pass",
+          summary: this.noScreenshots
+            ? "Couldn't start a browser to take screenshots; reviewed the markup and CSS against the design instead."
+            : `Round ${round}: screenshotted sign-in and the notes list at phone size.`,
+          bugs,
+        };
+        return ok(`\`\`\`json\n${JSON.stringify(report)}\n\`\`\``, 0.01);
       }
       case "launch": {
         await step("Writing the launch copy");
@@ -269,6 +311,15 @@ const MOCK_BRAND = {
 
 const wire = (title: string, rows: string) =>
   `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 360 640'><rect width='360' height='640' fill='#f7f4ed'/><rect x='0' y='0' width='360' height='56' fill='#1f3a5f'/><text x='20' y='35' font-family='sans-serif' font-size='18' fill='#fff'>${title}</text>${rows}</svg>`;
+
+/** A stand-in "screenshot": a phone-sized SVG, styled once the design issue is fixed. */
+const MOCK_SCREENSHOT = (title: string, round: number) =>
+  wire(
+    title,
+    round === 1
+      ? "<text x='20' y='100' font-family='serif' font-size='16' fill='#551a8b' text-decoration='underline'>Today  Notes  Settings</text><rect x='20' y='130' width='320' height='72' rx='8' fill='#fff' stroke='#ddd'/>"
+      : "<rect x='0' y='584' width='360' height='56' fill='#fff' stroke='#ddd'/><rect x='20' y='76' width='320' height='72' rx='8' fill='#fff' stroke='#ddd'/><rect x='20' y='160' width='320' height='72' rx='8' fill='#fff' stroke='#ddd'/><circle cx='60' cy='612' r='6' fill='#1f3a5f'/>",
+  );
 
 const MOCK_DESIGN = {
   summary: "Calm paper tones, one strong ink color, generous spacing. Every screen works one-handed on a phone.",

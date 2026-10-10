@@ -1,5 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { basename, extname, join, resolve } from "node:path";
 import { Board } from "../core/board.js";
 import { planDispatch, type Assignment } from "../core/dispatcher.js";
 import { anyOverlap, overlaps, resolveArea } from "../core/paths.js";
@@ -20,6 +20,7 @@ import {
   brandPrompt,
   buildPrompt,
   designPrompt,
+  designReviewPrompt,
   feasibilityPrompt,
   launchPrompt,
   prdChangePrompt,
@@ -131,9 +132,16 @@ export class Orchestrator {
   private mergeCount = 0;
   private qaNotes: string[] = [];
   private knownIssues: string[] = [];
+  /** The designer's review of the running app: notes per round, issues left after the last. */
+  private designNotes: string[] = [];
+  private designIssues: string[] = [];
+  /** Screenshots from the latest design review, for the release card. */
+  private screens: Screenshot[] = [];
   /** The approved brand and design, as markdown, for later prompts. */
   private brandDoc = "";
   private designDoc = "";
+  /** An existing product got its first design this run: its screens need restyling. */
+  private designIsNew = false;
   private launchWritten = false;
 
   constructor(
@@ -267,8 +275,12 @@ export class Orchestrator {
     this.mergeCount = 0;
     this.qaNotes = [];
     this.knownIssues = [];
+    this.designNotes = [];
+    this.designIssues = [];
+    this.screens = [];
     this.brandDoc = "";
     this.designDoc = "";
+    this.designIsNew = false;
     this.launchWritten = false;
     this.board.addAgent({
       id: IDS.cfo,
@@ -319,7 +331,7 @@ export class Orchestrator {
 
       // 2. Brand (marketing), then design (designer, signed off by the PM)
       await this.brandPhase(idea);
-      await this.designPhase(idea);
+      await this.designPhase(idea, existingFiles);
 
       // 3. Architecture and areas (an existing product reuses its saved areas)
       let arch = this.existing ? savedAreas(repo.readMain("docs/areas.json")) : undefined;
@@ -368,6 +380,7 @@ export class Orchestrator {
           areas,
           existingFiles ? { request: idea, existingFiles } : undefined,
           this.designDoc || undefined,
+          this.designIsNew,
         ),
         cwd: repo.dir,
         canWrite: false,
@@ -425,7 +438,8 @@ export class Orchestrator {
   /**
    * Marketing names and brands the product: name, tagline, positioning,
    * voice, colors and logo. The CEO approves it; the product takes the name.
-   * An existing product keeps the brand it has (or its name, if it has none).
+   * An existing product keeps the brand it has; one without a brand gets
+   * one, keeping its name unless the name is a placeholder.
    */
   private async brandPhase(idea: string): Promise<void> {
     const repo = this.repo!;
@@ -435,14 +449,15 @@ export class Orchestrator {
       this.board.log("info", `Using the existing brand: ${saved.name}`, { agentId: IDS.marketing });
       return;
     }
-    if (!this.cfg.marketing || this.existing) return;
+    if (!this.cfg.marketing) return;
+    const currentName = this.existing ? this.board.project!.name : undefined;
 
     const plan = await this.untilApproved<BrandPlan>("brand", async (feedback, previous) => {
       this.board.updateProject({ phase: "branding" });
       const res = await this.runAgent(IDS.marketing, {
         kind: "brand",
         systemPrompt: systemPrompts.marketing,
-        prompt: brandPrompt(idea, this.prd, feedback, previous),
+        prompt: brandPrompt(idea, this.prd, feedback, previous, currentName),
         cwd: repo.dir,
         canWrite: false,
         context: { idea, prd: this.prd, feedback },
@@ -489,13 +504,14 @@ export class Orchestrator {
    * it against the PRD and has the final call on scope. They go back and
    * forth up to `designRounds` times, then the PM's cuts are binding. The
    * CEO then approves the result. An existing product's design is updated
-   * for the change, if it has one.
+   * for the change; one built without a design gets one for all its screens.
    */
-  private async designPhase(idea: string): Promise<void> {
+  private async designPhase(idea: string, existingFiles?: string[]): Promise<void> {
     const repo = this.repo!;
     const current = this.existing ? repo.readMain("docs/design/DESIGN.md") : "";
     this.designDoc = current;
-    if (!this.cfg.design || (this.existing && !current)) return;
+    if (!this.cfg.design) return;
+    const firstDesign = this.existing && !current;
 
     type Approved = { doc: string; files: Record<string, string> };
     const approved = await this.untilApproved<Approved>("design", async (feedback, previous) => {
@@ -513,6 +529,7 @@ export class Orchestrator {
             previous: last,
             current: current || undefined,
             change: this.existing ? idea : undefined,
+            existingFiles: firstDesign ? existingFiles : undefined,
           }),
           cwd: repo.dir,
           canWrite: false,
@@ -562,7 +579,7 @@ export class Orchestrator {
           images.push({ title: screen.name, svg });
         }
         return {
-          title: this.existing ? "Approve the updated design" : "Approve the design",
+          title: this.existing && !firstDesign ? "Approve the updated design" : "Approve the design",
           content: doc,
           value: { doc, files },
           images,
@@ -570,8 +587,9 @@ export class Orchestrator {
       }
     });
 
-    await repo.commitToMain(approved.files, this.existing ? "Designer: update the design" : "Designer: design system and key screens");
+    await repo.commitToMain(approved.files, current ? "Designer: update the design" : "Designer: design system and key screens");
     this.designDoc = approved.doc;
+    this.designIsNew = firstDesign;
     this.board.updateAgent(IDS.designer, { activity: "Design approved" });
   }
 
@@ -662,9 +680,12 @@ export class Orchestrator {
         const outcome = await this.dispatchUntilDone();
         if (outcome !== "done") return;
         if (this.qaRound >= this.cfg.qaRounds) break;
+        // QA tests that it works; the designer looks at the running screens.
         const filed = await this.runQa();
         if (this.abort.signal.aborted) return;
-        if (filed === 0) break;
+        const design = await this.runDesignReview();
+        if (this.abort.signal.aborted) return;
+        if (filed + design === 0) break;
         this.board.updateProject({ phase: "building" });
       }
       // A held release comes back as change tickets; build, test and ask again.
@@ -822,12 +843,103 @@ export class Orchestrator {
     return report.bugs.length;
   }
 
+  /**
+   * The designer runs the merged app, screenshots its screens at phone and
+   * desktop size, looks at them against the design, and files what a
+   * customer would notice as design tickets. Same round limit as QA: on
+   * the last round, open issues go on the release card instead.
+   */
+  private async runDesignReview(): Promise<number> {
+    if (!this.cfg.design || !this.designDoc) return 0;
+    const repo = this.repo!;
+    const round = this.qaRound;
+    this.board.updateProject({ phase: "testing" });
+    this.board.log("info", `Design review round ${round}: screenshotting the running app`, { agentId: IDS.designer });
+
+    const scratch = `DESIGN-${round}`;
+    const dir = await repo.openWorktree(scratch);
+    const earlier = this.board.tickets
+      .filter((t) => t.kind === "design")
+      .map((t) => ({ title: t.title.replace(/^Design: /, ""), fixed: t.status === "done" }));
+    let report: QaReport;
+    try {
+      const res = await this.runAgent(IDS.designer, {
+        kind: "design_review",
+        systemPrompt: systemPrompts.design_reviewer,
+        prompt: designReviewPrompt(this.prd, [...this.board.areas], round, earlier),
+        cwd: dir,
+        canWrite: true,
+        maxTurns: 50,
+        context: { qaRound: round, prd: this.prd, design: this.designDoc },
+      });
+      this.screens = readScreens(join(dir, ".switchyard/screens"));
+      report = parseWith(QaReportSchema, res.text);
+    } catch (err) {
+      if (this.abort.signal.aborted) return 0;
+      const why = (err as Error).message;
+      this.designNotes.push(`Round ${round}: the designer couldn't finish (${why}).`);
+      this.board.log("warn", `Design review round ${round} couldn't finish: ${why}`, { agentId: IDS.designer });
+      return 0;
+    } finally {
+      await repo.closeWorktree(scratch, true);
+    }
+    const shots = this.screens.length
+      ? `${this.screens.length} screenshot${this.screens.length === 1 ? "" : "s"}`
+      : "no screenshots";
+
+    if (report.verdict === "pass" || report.bugs.length === 0) {
+      this.designIssues = [];
+      this.designNotes.push(`Round ${round}: passed (${shots}). ${report.summary}`.trim());
+      this.board.updateAgent(IDS.designer, { activity: `Design review ${round} passed` });
+      this.board.log("info", `Design review round ${round} passed (${shots})`, { agentId: IDS.designer });
+      return 0;
+    }
+
+    if (round >= this.cfg.qaRounds) {
+      this.designIssues = report.bugs.map((b) => `${b.title} (${b.severity})`);
+      this.designNotes.push(`Round ${round}: ${report.bugs.length} issue(s) still visible (${shots}). ${report.summary}`.trim());
+      this.board.updateAgent(IDS.designer, { activity: `Design review ${round}: ${report.bugs.length} still open` });
+      this.board.log("warn", `Design review round ${round} still found ${report.bugs.length} issue(s); listed on the release card`, {
+        agentId: IDS.designer,
+      });
+      return 0;
+    }
+
+    const areas = [...this.board.areas];
+    for (const bug of report.bugs) {
+      const area = this.areaFor(bug.files, undefined, `Design: ${bug.title}`, areas);
+      const steps = bug.steps.length ? `\n\nWhere to see it:\n${bug.steps.map((x, i) => `${i + 1}. ${x}`).join("\n")}` : "";
+      this.board.addTicket({
+        title: `Design: ${bug.title}`,
+        description: `${bug.description}${steps}${bug.expected ? `\n\nThe design calls for: ${bug.expected}` : ""}\n\n\
+Found by the designer in design review round ${round} (${bug.severity}). Follow docs/design/DESIGN.md and docs/design/tokens.css.`,
+        acceptance: [bug.expected || "The issue is no longer visible on the screen"],
+        area,
+        files: bug.files,
+        dependsOn: [],
+        priority: 0,
+        status: "ready",
+        kind: "design",
+        size: "S",
+      });
+      this.traceBug(bug.title, bug.files);
+    }
+    this.allocateBudgets();
+    this.designNotes.push(`Round ${round}: filed ${report.bugs.length} design issue(s) (${shots}). ${report.summary}`.trim());
+    this.board.updateAgent(IDS.designer, { activity: `Design review ${round}: filed ${report.bugs.length} issue(s)` });
+    this.board.log("warn", `Design review round ${round} filed ${report.bugs.length} issue(s)`, { agentId: IDS.designer });
+    return report.bugs.length;
+  }
+
   /** Penalize whoever merged the files a QA bug points at. */
   private traceBug(title: string, files: string[]): void {
     if (files.length === 0) return;
     const culprit = [...this.board.tickets]
       .reverse()
-      .find((t) => t.status === "done" && t.kind !== "bug" && t.assignee && anyOverlap(t.changedFiles ?? t.files, files));
+      .find(
+        (t) =>
+          t.status === "done" && t.kind !== "bug" && t.kind !== "design" && t.assignee && anyOverlap(t.changedFiles ?? t.files, files),
+      );
     if (!culprit?.assignee) return;
     this.score(culprit.assignee, POINTS.bugTraced, { bugs: 1 }, `QA traced "${title}" to ${culprit.id}`);
   }
@@ -835,11 +947,30 @@ export class Orchestrator {
   private async release(): Promise<"shipped" | "changes"> {
     this.board.updateProject({ phase: "releasing" });
     const launch = await this.writeLaunchCopy();
+    // What the CEO is about to ship, as the designer saw it.
+    if (this.screens.length > 0) {
+      await this.repo!.commitToMain(
+        Object.fromEntries(this.screens.map((s) => [`docs/screens/${s.name}${s.ext}`, s.data])),
+        "Designer: screenshots of the release",
+      );
+    }
     const log = await this.repo!.log(50);
     const tickets = this.board.tickets;
     const merged = tickets.filter((t) => t.status === "done");
     const skipped = tickets.filter((t) => t.status === "skipped");
     const bugsFixed = tickets.filter((t) => t.kind === "bug" && t.status === "done").length;
+    const designFixed = tickets.filter((t) => t.kind === "design" && t.status === "done").length;
+    const designLine = !this.cfg.design || !this.designDoc
+      ? "\n**Design review:** off. Nobody has looked at the running screens; check them yourself before you ship.\n"
+      : `\n**Design review:** ${
+          this.designIssues.length > 0
+            ? `${this.designIssues.length} issue(s) still visible: ${this.designIssues.join("; ")}`
+            : `passed${designFixed > 0 ? `, after fixing ${designFixed} issue(s) it found` : ""}`
+        }${
+          this.screens.length === 0
+            ? ". **No screenshots:** the designer couldn't run the app, so nobody has seen these screens. Check them yourself before you ship."
+            : `. The screenshots above are what you're shipping (also in \`docs/screens/\`).`
+        }\n${this.designNotes.length > 0 ? `\n${this.designNotes.map((n) => `- ${n}`).join("\n")}\n` : ""}`;
     const qa =
       this.cfg.qaRounds === 0
         ? "turned off"
@@ -849,7 +980,7 @@ export class Orchestrator {
     const summary = `${merged.length} of ${tickets.length} tickets merged into main.
 ${skipped.length > 0 ? `\n**Skipped by you:** ${skipped.map((t) => `${t.id} ${t.title}`).join(", ")}. Dependents were built without them, using stubs.\n` : ""}
 **QA:** ${qa}
-${this.qaNotes.length > 0 ? `\n${this.qaNotes.map((n) => `- ${n}`).join("\n")}\n` : ""}
+${this.qaNotes.length > 0 ? `\n${this.qaNotes.map((n) => `- ${n}`).join("\n")}\n` : ""}${designLine}
 ${launch ? `**Launch copy** (from marketing): ${launch}\n\n` : ""}**Spend:** $${this.board.project!.spentUsd.toFixed(2)} of $${this.board.project!.budgetUsd.toFixed(2)}
 
 **Repo:** \`${this.repo!.dir}\`
@@ -857,7 +988,11 @@ ${launch ? `**Launch copy** (from marketing): ${launch}\n\n` : ""}**Spend:** $${
 Recent commits:
 ${log.slice(0, 15).map((l) => `- ${l}`).join("\n")}`;
     const title = this.releaseRound === 0 ? (this.existing ? "Approve the release" : "Approve the v1 release") : `Approve the release (round ${this.releaseRound + 1})`;
-    const gate = await this.waitForGate(this.board.openGate("release", title, summary));
+    const images = this.screens.map((s) => ({
+      title: s.name,
+      ...(s.ext === ".svg" ? { svg: s.data.toString("utf8") } : { png: s.data.toString("base64") }),
+    }));
+    const gate = await this.waitForGate(this.board.openGate("release", title, summary, undefined, images));
     if (gate.status === "approved") {
       this.board.updateProject({ phase: "shipped" });
       this.board.log("info", this.existing ? "Shipped the update" : "Shipped v1");
@@ -870,8 +1005,9 @@ ${log.slice(0, 15).map((l) => `- ${l}`).join("\n")}`;
     this.releaseRound++;
     const filed = feedback ? await this.fileChangeTickets(feedback) : 0;
     if (filed > 0) {
-      this.qaRound = 0; // the changes get a fresh QA pass
+      this.qaRound = 0; // the changes get a fresh QA and design pass
       this.knownIssues = [];
+      this.designIssues = [];
       this.qaNotes.push(`Release round ${this.releaseRound}: you asked for changes (${filed} ticket(s)).`);
     } else {
       this.board.log("warn", "No change tickets came out of the feedback; asking for the release again", { agentId: IDS.taskCreator });
@@ -1319,6 +1455,7 @@ ${(t.failures ?? []).map((f, i) => `${i + 1}. ${f}`).join("\n")}
         architecture: "Handed in the architecture",
         tickets: "Filed the tickets",
         launch: "Wrote the launch copy",
+        design_review: "",
         review: "",
         build: "",
         qa: "",
@@ -1376,6 +1513,39 @@ function productName(dir: string): string {
   const readme = existsSync(join(dir, "README.md")) ? readFileSync(join(dir, "README.md"), "utf8") : "";
   const heading = readme.match(/^#\s+(.+)$/m)?.[1]?.trim();
   return heading || basename(dir).replace(/-[a-z0-9]{6,9}$/, "");
+}
+
+interface Screenshot {
+  name: string;
+  ext: ".png" | ".svg";
+  data: Buffer;
+}
+
+/** Largest screenshot kept for the release card, and how many. */
+const MAX_SCREEN_BYTES = 700_000;
+const MAX_SCREENS = 8;
+
+/** Screenshots the designer saved, smallest set that fits on the release card. */
+function readScreens(dir: string): Screenshot[] {
+  if (!existsSync(dir)) return [];
+  const out: Screenshot[] = [];
+  for (const file of readdirSync(dir).sort()) {
+    const ext = extname(file).toLowerCase();
+    if (ext !== ".png" && ext !== ".svg") continue;
+    const path = join(dir, file);
+    if (!statSync(path).isFile() || statSync(path).size > MAX_SCREEN_BYTES) continue;
+    let data = readFileSync(path);
+    if (ext === ".svg") {
+      const svg = safeSvg(data.toString("utf8"));
+      if (!svg) continue;
+      data = Buffer.from(svg);
+    } else if (!data.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+      continue; // not really a PNG
+    }
+    out.push({ name: slugify(basename(file, extname(file))), ext, data });
+    if (out.length >= MAX_SCREENS) break;
+  }
+  return out;
 }
 
 /** The brand saved by an earlier run, if it parses and its logo is usable. */

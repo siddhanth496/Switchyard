@@ -10,6 +10,7 @@ export type TaskKind =
   | "build"
   | "review"
   | "qa"
+  | "design_review"
   | "launch";
 
 /** One unit of agent work. The orchestrator builds these; runners execute them. */

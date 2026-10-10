@@ -238,3 +238,16 @@ describe("agent SVGs", () => {
     expect(safeSvg(`<svg>${"x".repeat(50_000)}</svg>`)).toBeUndefined();
   });
 });
+
+describe("agent answers", () => {
+  it("treats null like a missing field instead of rejecting the answer", async () => {
+    const { DesignSchema, QaReportSchema, TicketPlanSchema } = await import("../src/agents/schemas.js");
+    const d = DesignSchema.parse({ summary: "s", principles: null, screens: [{ name: "A", wireframeSvg: null, states: null }] });
+    expect(d.screens[0]!.wireframeSvg).toBeUndefined();
+    expect(d.principles).toEqual([]);
+    expect(TicketPlanSchema.parse({ tickets: [{ key: "a", title: "t", files: ["x"], size: null }] }).tickets[0]!.size).toBe("M");
+    const q = QaReportSchema.parse({ verdict: "bugs", bugs: [{ title: "b", severity: "critical", files: null }] });
+    expect(q.bugs[0]!.severity).toBe("medium");
+    expect(QaReportSchema.parse({ verdict: "pass", bugs: null }).bugs).toEqual([]);
+  });
+});

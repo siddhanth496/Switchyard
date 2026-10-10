@@ -544,6 +544,30 @@ describe("marketing and design", () => {
     expect(readFileSync(join(v1.dir, "docs/design/DESIGN.md"), "utf8")).toContain("# Design");
   }, 40_000);
 
+  it("asks an agent to fix an unreadable answer instead of failing the run", async () => {
+    const tasks: AgentTask[] = [];
+    const mock = new MockRunner({ stepMs: 0 });
+    const runner: AgentRunner = {
+      name: "spy",
+      run: (t, on, sig) => {
+        tasks.push(t);
+        if (t.kind === "design" && !t.context.repair) {
+          return Promise.resolve({ ok: true, text: '```json\n{"summary": "x", "screens": [{"name": 7}]}\n```', costUsd: 0.01 });
+        }
+        return mock.run(t, on, sig);
+      },
+    };
+    const orch = new Orchestrator(runner, { workspaceDir: workspace(), autoApprove: "all", tickMs: 5, qaRounds: 0 });
+    const project = await orch.run("A notes app");
+    expect(project.phase).toBe("shipped");
+    const repair = tasks.find((t) => t.kind === "design" && t.context.repair)!;
+    expect(repair.prompt).toContain("screens.0.name");
+    expect(repair.canWrite).toBe(false);
+    expect(orch.board.snapshot().log.some((l) => l.message.startsWith("Designer's answer didn't match the format"))).toBe(true);
+    // The PM judges the design knowing the brand is settled.
+    expect(tasks.find((t) => t.kind === "feasibility")!.prompt).toContain("Approved brand (final");
+  }, 30_000);
+
   it("can run without marketing and design", async () => {
     const orch = new Orchestrator(new MockRunner({ stepMs: 0 }), {
       workspaceDir: workspace(),

@@ -26,6 +26,7 @@ import {
   prdChangePrompt,
   prdPrompt,
   qaPrompt,
+  repairPrompt,
   reviewPrompt,
   systemPrompts,
   ticketsPrompt,
@@ -48,6 +49,7 @@ import {
   type QaReport,
 } from "../agents/schemas.js";
 import { ProjectRepo } from "../git/repo.js";
+import { z } from "zod";
 import { monogramLogo, paletteSvg, renderBrand, renderDesign, renderLaunch, safeSvg, slugify, toBrand } from "./brand.js";
 
 export interface OrchestratorConfig {
@@ -340,7 +342,7 @@ export class Orchestrator {
       } else {
         arch = await this.untilApproved<Architecture>("architecture", async (feedback) => {
           this.board.updateProject({ phase: "architecture" });
-          const res = await this.runAgent(IDS.techLead, {
+          const { value: parsed } = await this.runForJson(ArchitectureSchema, IDS.techLead, {
             kind: "architecture",
             systemPrompt: systemPrompts.tech_lead,
             prompt: architecturePrompt(this.prd, feedback, existingFiles, this.designDoc || undefined),
@@ -348,7 +350,6 @@ export class Orchestrator {
             canWrite: false,
             context: { prd: this.prd, feedback },
           });
-          const parsed = parseWith(ArchitectureSchema, res.text);
           return { title: "Approve the architecture", content: renderArchitecture(parsed), value: parsed };
         });
       }
@@ -371,7 +372,7 @@ export class Orchestrator {
 
       // 4. Tickets (for an existing product: only the requested change)
       this.board.updateProject({ phase: "ticketing" });
-      const plan = await this.runAgent(IDS.taskCreator, {
+      const { value: plan } = await this.runForJson(TicketPlanSchema, IDS.taskCreator, {
         kind: "tickets",
         systemPrompt: systemPrompts.task_creator,
         prompt: ticketsPrompt(
@@ -386,7 +387,7 @@ export class Orchestrator {
         canWrite: false,
         context: { prd: this.prd, areas, changeRequest: this.existing ? idea : undefined },
       });
-      this.createTickets(parseWith(TicketPlanSchema, plan.text).tickets, areas, this.existing ? "change" : undefined);
+      this.createTickets(plan.tickets, areas, this.existing ? "change" : undefined);
 
       // 5. Build
       this.board.updateProject({ phase: "building" });
@@ -454,7 +455,7 @@ export class Orchestrator {
 
     const plan = await this.untilApproved<BrandPlan>("brand", async (feedback, previous) => {
       this.board.updateProject({ phase: "branding" });
-      const res = await this.runAgent(IDS.marketing, {
+      const { value: proposed } = await this.runForJson(BrandSchema, IDS.marketing, {
         kind: "brand",
         systemPrompt: systemPrompts.marketing,
         prompt: brandPrompt(idea, this.prd, feedback, previous, currentName),
@@ -462,7 +463,6 @@ export class Orchestrator {
         canWrite: false,
         context: { idea, prd: this.prd, feedback },
       });
-      const proposed = parseWith(BrandSchema, res.text);
       const logo = safeSvg(proposed.logoSvg);
       if (!logo) this.board.log("warn", "Marketing's logo wasn't a usable SVG; showing a monogram instead", { agentId: IDS.marketing });
       const brand = { ...proposed, logoSvg: logo ?? monogramLogo(proposed.name, proposed.palette[0]?.hex) };
@@ -520,7 +520,7 @@ export class Orchestrator {
       let last = previous;
       for (let round = 1; ; round++) {
         const final = round >= this.cfg.designRounds;
-        const res = await this.runAgent(IDS.designer, {
+        const { value: design } = await this.runForJson(DesignSchema, IDS.designer, {
           kind: "design",
           systemPrompt: systemPrompts.designer,
           prompt: designPrompt(this.prd, this.brandDoc, {
@@ -535,21 +535,20 @@ export class Orchestrator {
           canWrite: false,
           context: { prd: this.prd, brand: this.brandDoc, feedback, pmNotes, designRound: round, changeRequest: this.existing ? idea : undefined },
         });
-        const design = parseWith(DesignSchema, res.text);
         const draft = renderDesign(design);
 
-        const check = await this.runAgent(IDS.pm, {
-          kind: "feasibility",
-          systemPrompt: systemPrompts.pm_feasibility,
-          prompt: feasibilityPrompt(this.prd, draft, round, final),
-          cwd: repo.dir,
-          canWrite: false,
-          context: { prd: this.prd, design: draft, designRound: round, finalRound: final },
-        });
         let review: Feasibility;
         try {
-          review = parseWith(FeasibilitySchema, check.text);
-        } catch {
+          ({ value: review } = await this.runForJson(FeasibilitySchema, IDS.pm, {
+            kind: "feasibility",
+            systemPrompt: systemPrompts.pm_feasibility,
+            prompt: feasibilityPrompt(this.prd, draft, round, final, this.brandDoc),
+            cwd: repo.dir,
+            canWrite: false,
+            context: { prd: this.prd, design: draft, brand: this.brandDoc, designRound: round, finalRound: final },
+          }));
+        } catch (err) {
+          if (this.abort.signal.aborted) throw err;
           review = { verdict: "feasible", notes: "", cuts: [] };
           this.board.log("warn", "The PM's feasibility review was unreadable; treating the design as feasible", { agentId: IDS.pm });
         }
@@ -701,7 +700,7 @@ export class Orchestrator {
     this.board.updateProject({ phase: "ticketing" });
     try {
       const areas = [...this.board.areas];
-      const res = await this.runAgent(IDS.taskCreator, {
+      const { value: changePlan } = await this.runForJson(TicketPlanSchema, IDS.taskCreator, {
         kind: "tickets",
         systemPrompt: systemPrompts.task_creator,
         prompt: ticketsPrompt(
@@ -715,7 +714,7 @@ export class Orchestrator {
         canWrite: false,
         context: { prd: this.prd, areas, changeRequest: feedback },
       });
-      const planned = parseWith(TicketPlanSchema, res.text).tickets;
+      const planned = changePlan.tickets;
       this.createTickets(planned, areas, "change");
       return planned.length;
     } catch (err) {
@@ -781,7 +780,7 @@ export class Orchestrator {
       .map((t) => ({ title: t.title.replace(/^Bug: /, ""), fixed: t.status === "done" }));
     let report: QaReport;
     try {
-      const res = await this.runAgent(IDS.qa, {
+      ({ value: report } = await this.runForJson(QaReportSchema, IDS.qa, {
         kind: "qa",
         systemPrompt: systemPrompts.qa,
         prompt: qaPrompt(this.prd, merged, [...this.board.areas], round, earlier),
@@ -789,8 +788,7 @@ export class Orchestrator {
         canWrite: true,
         maxTurns: 40,
         context: { qaRound: round, prd: this.prd },
-      });
-      report = parseWith(QaReportSchema, res.text);
+      }));
     } catch (err) {
       if (this.abort.signal.aborted) return 0;
       const why = (err as Error).message;
@@ -863,7 +861,7 @@ export class Orchestrator {
       .map((t) => ({ title: t.title.replace(/^Design: /, ""), fixed: t.status === "done" }));
     let report: QaReport;
     try {
-      const res = await this.runAgent(IDS.designer, {
+      ({ value: report } = await this.runForJson(QaReportSchema, IDS.designer, {
         kind: "design_review",
         systemPrompt: systemPrompts.design_reviewer,
         prompt: designReviewPrompt(this.prd, [...this.board.areas], round, earlier),
@@ -871,9 +869,8 @@ export class Orchestrator {
         canWrite: true,
         maxTurns: 50,
         context: { qaRound: round, prd: this.prd, design: this.designDoc },
-      });
+      }));
       this.screens = readScreens(join(dir, ".switchyard/screens"));
-      report = parseWith(QaReportSchema, res.text);
     } catch (err) {
       if (this.abort.signal.aborted) return 0;
       const why = (err as Error).message;
@@ -1027,7 +1024,7 @@ ${log.slice(0, 15).map((l) => `- ${l}`).join("\n")}`;
     const repo = this.repo!;
     try {
       const shipped = this.board.tickets.filter((t) => t.status === "done" && t.kind !== "bug");
-      const res = await this.runAgent(IDS.marketing, {
+      const { value: launch } = await this.runForJson(LaunchSchema, IDS.marketing, {
         kind: "launch",
         systemPrompt: systemPrompts.marketing,
         prompt: launchPrompt(this.prd, this.brandDoc, shipped, this.existing ? this.board.project!.idea : undefined),
@@ -1035,7 +1032,6 @@ ${log.slice(0, 15).map((l) => `- ${l}`).join("\n")}`;
         canWrite: false,
         context: { prd: this.prd, brand: this.brandDoc, changeRequest: this.existing ? this.board.project!.idea : undefined },
       });
-      const launch = parseWith(LaunchSchema, res.text);
       await repo.commitToMain({ "docs/brand/LAUNCH.md": renderLaunch(brand.name, launch) }, "Marketing: launch copy");
       return `_${launch.headline}_${launch.description ? ` ${launch.description}` : ""} Full copy in \`docs/brand/LAUNCH.md\`.`;
     } catch (err) {
@@ -1429,6 +1425,37 @@ ${(t.failures ?? []).map((f, i) => `${i + 1}. ${f}`).join("\n")}
 
   // ---- agents ----------------------------------------------------------
 
+  /**
+   * Run an agent whose answer must be a JSON block. If the answer doesn't
+   * match the schema, the agent gets one cheap, read-only chance to fix it,
+   * told exactly which fields were wrong, before the step fails.
+   */
+  private async runForJson<T>(
+    schema: z.ZodType<T>,
+    agentId: string,
+    task: Omit<AgentTask, "agentId" | "role">,
+  ): Promise<{ value: T; res: AgentResult }> {
+    const res = await this.runAgent(agentId, task);
+    try {
+      return { value: parseWith(schema, res.text), res };
+    } catch (err) {
+      if (this.abort.signal.aborted) throw err;
+      const problems = parseProblems(err);
+      const name = this.board.agent(agentId).name;
+      this.board.log("warn", `${name}'s answer didn't match the format (${problems.slice(0, 3).join("; ")}); asking it to fix it`, {
+        agentId,
+      });
+      const fix = await this.runAgent(agentId, {
+        ...task,
+        canWrite: false,
+        maxTurns: 4,
+        prompt: repairPrompt(res.text, problems),
+        context: { ...task.context, repair: true },
+      });
+      return { value: parseWith(schema, fix.text), res: fix };
+    }
+  }
+
   private async runAgent(
     agentId: string,
     task: Omit<AgentTask, "agentId" | "role">,
@@ -1513,6 +1540,14 @@ function productName(dir: string): string {
   const readme = existsSync(join(dir, "README.md")) ? readFileSync(join(dir, "README.md"), "utf8") : "";
   const heading = readme.match(/^#\s+(.+)$/m)?.[1]?.trim();
   return heading || basename(dir).replace(/-[a-z0-9]{6,9}$/, "");
+}
+
+/** What was wrong with an agent's JSON, one line per problem. */
+function parseProblems(err: unknown): string[] {
+  if (err instanceof z.ZodError) {
+    return err.issues.map((i) => `${i.path.length ? i.path.join(".") : "(top level)"}: ${i.message}`);
+  }
+  return [err instanceof Error ? err.message : String(err)];
 }
 
 interface Screenshot {

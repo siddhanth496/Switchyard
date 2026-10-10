@@ -52,6 +52,8 @@ export interface AgentTask {
     /** Design round, starting at 1; the last one is the PM's final call. */
     designRound?: number;
     finalRound?: boolean;
+    /** Set when the agent is asked to fix an answer the system couldn't read. */
+    repair?: boolean;
   };
 }
 

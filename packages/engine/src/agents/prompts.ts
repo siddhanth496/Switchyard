@@ -388,14 +388,17 @@ Finish with a JSON block:
 \`\`\``;
 }
 
-export function feasibilityPrompt(prd: string, design: string, round: number, final: boolean): string {
+export function feasibilityPrompt(prd: string, design: string, round: number, final: boolean, brand?: string): string {
   const last = final
     ? `\nThis is round ${round} and the final one: make the call now. Return "feasible", and put anything that still \
 doesn't fit this version under "cuts".\n`
     : round > 1
       ? `\nThis is round ${round}: the designer revised the design after your last notes.\n`
       : "";
-  return `PRD:\n${prd}\n\nDesign to review:\n${design}\n${last}\nIs this design feasible for this version?`;
+  const approvedBrand = brand
+    ? `\nApproved brand (final: the CEO approved this name, logo, colors and voice; judge the design's use of it, not the brand itself):\n${brand}\n`
+    : "";
+  return `PRD:\n${prd}\n${approvedBrand}\nDesign to review:\n${design}\n${last}\nIs this design feasible for this version?`;
 }
 
 export function launchPrompt(prd: string, brand: string, shipped: Ticket[], change?: string): string {
@@ -427,4 +430,18 @@ ${prd}
 Code areas (use these paths when you name the files at fault):
 ${areaList}
 ${previous}`;
+}
+
+/** A second chance for an agent whose JSON didn't match the expected shape. */
+export function repairPrompt(previous: string, problems: string[]): string {
+  const clipped = previous.length > 60_000 ? `${previous.slice(0, 60_000)}\n... (truncated)` : previous;
+  return `Your last answer couldn't be read by the system. Problems in its JSON block:
+${problems.map((p) => `- ${p}`).join("\n")}
+
+Leave out a field you have nothing for (don't write null for it), and keep every value the type the example showed.
+
+Your last answer:
+${clipped}
+
+Reply with the complete, corrected JSON block in a \`\`\`json fence. Change nothing else.`;
 }

@@ -69,7 +69,7 @@ describe("orchestrator (mock agents, real git)", () => {
   it("waits at the PRD gate and redoes the PRD on rejection", async () => {
     const orch = new Orchestrator(new MockRunner({ stepMs: 0 }), {
       workspaceDir: workspace(),
-      autoApprove: ["architecture", "release"],
+      autoApprove: ["brand", "design", "architecture", "release"],
       tickMs: 10,
     });
     orch.start("A notes app");
@@ -89,7 +89,7 @@ describe("orchestrator (mock agents, real git)", () => {
   it("pauses dispatch at the budget and resumes when approved", async () => {
     const orch = new Orchestrator(new MockRunner({ stepMs: 0 }), {
       workspaceDir: workspace(),
-      autoApprove: ["prd", "architecture", "release"],
+      autoApprove: ["prd", "brand", "design", "architecture", "release"],
       budgetUsd: 0.06,
       tickMs: 10,
     });
@@ -158,7 +158,7 @@ describe("failures", () => {
     const { state, runner } = flakyShell();
     const orch = new Orchestrator(runner, {
       workspaceDir: workspace(),
-      autoApprove: ["prd", "architecture", "release"],
+      autoApprove: ["prd", "brand", "design", "architecture", "release"],
       tickMs: 5,
     });
     orch.start("A notes app");
@@ -197,7 +197,7 @@ describe("failures", () => {
     const { state, runner } = flakyShell();
     const orch = new Orchestrator(runner, {
       workspaceDir: workspace(),
-      autoApprove: ["prd", "architecture", "release"],
+      autoApprove: ["prd", "brand", "design", "architecture", "release"],
       tickMs: 5,
     });
     orch.start("A notes app");
@@ -366,7 +366,7 @@ describe("changes after the build", () => {
   it("turns a held release into change tickets, rebuilds, re-tests and asks again", async () => {
     const orch = new Orchestrator(new MockRunner({ stepMs: 0 }), {
       workspaceDir: workspace(),
-      autoApprove: ["prd", "architecture"],
+      autoApprove: ["prd", "brand", "design", "architecture"],
       tickMs: 5,
     });
     orch.start("A notes app");
@@ -409,5 +409,96 @@ describe("changes after the build", () => {
     expect(second.board.tickets[0]!.kind).toBe("change");
     expect(Number(git(v1.dir, "rev-list", "--count", "main").trim())).toBeGreaterThan(Number(commitsBefore));
     expect(readFileSync(join(v1.dir, "web/notes.html"), "utf8")).toContain("Change: Add tags to notes");
+    // The brand carries over; the designer updates the existing design for the change.
+    expect(second.board.gates.some((g) => g.kind === "brand")).toBe(false);
+    expect(v2.brand?.name).toBe("Jotter");
+    expect(second.board.gates.find((g) => g.kind === "design")!.title).toBe("Approve the updated design");
+    expect(readFileSync(join(v1.dir, "docs/design/DESIGN.md"), "utf8")).toContain("Updated for: Add tags to notes");
   }, 40_000);
+});
+
+describe("marketing and design", () => {
+  it("brands the product, designs it, has the PM check feasibility, and writes launch copy", async () => {
+    const orch = new Orchestrator(new MockRunner({ stepMs: 0, pmPushesBackDesign: "once" }), {
+      workspaceDir: workspace(),
+      autoApprove: "all",
+      tickMs: 5,
+      qaRounds: 0,
+    });
+    const project = await orch.run("A minimal notes app with login");
+    expect(project.phase).toBe("shipped");
+
+    // Gates come in order: PRD, brand, design (after the PM's sign-off), architecture.
+    expect(orch.board.gates.map((g) => g.kind).slice(0, 4)).toEqual(["prd", "brand", "design", "architecture"]);
+
+    // Marketing named the product; the logo travels with the brand card.
+    expect(project.name).toBe("Jotter");
+    expect(project.brand?.tagline).toBe("Write it down. Find it fast.");
+    const brandGate = orch.board.gates.find((g) => g.kind === "brand")!;
+    expect(brandGate.images?.[0]?.svg).toMatch(/^<svg/);
+    const dir = project.dir;
+    expect(readFileSync(join(dir, "README.md"), "utf8")).toMatch(/^# Jotter\n\n> Write it down/);
+    expect(readFileSync(join(dir, "docs/brand/logo.svg"), "utf8")).toMatch(/^<svg/);
+    expect(readFileSync(join(dir, "docs/brand/BRAND.md"), "utf8")).toContain("## Voice");
+
+    // The PM sent the first design back (offline mode isn't in the PRD); the revision passed.
+    const log = orch.board.snapshot().log.map((l) => l.message);
+    expect(log.some((m) => m.startsWith("PM sent the design back"))).toBe(true);
+    const design = readFileSync(join(dir, "docs/design/DESIGN.md"), "utf8");
+    expect(design).not.toContain("### Offline mode");
+    expect(design).toContain("Signed off after 2 review rounds");
+    expect(readFileSync(join(dir, "docs/design/tokens.css"), "utf8")).toContain("--color-primary");
+    expect(readFileSync(join(dir, "docs/design/wireframes/notes-list.svg"), "utf8")).toMatch(/^<svg/);
+    expect(orch.board.gates.find((g) => g.kind === "design")!.images).toHaveLength(2);
+
+    // Marketing's launch copy is on the release card and in the repo.
+    expect(orch.board.gates.find((g) => g.kind === "release")!.content).toContain("Launch copy");
+    expect(readFileSync(join(dir, "docs/brand/LAUNCH.md"), "utf8")).toContain("Notes that keep up with you");
+    expect(orch.board.agents.map((a) => a.id)).toEqual(expect.arrayContaining(["marketing", "designer"]));
+  }, 30_000);
+
+  it("gives the PM the final call: after the last round its cuts are binding", async () => {
+    const tasks: AgentTask[] = [];
+    const mock = new MockRunner({ stepMs: 0, pmPushesBackDesign: "always" });
+    const runner: AgentRunner = { name: "spy", run: (t, on, sig) => (tasks.push(t), mock.run(t, on, sig)) };
+    const orch = new Orchestrator(runner, { workspaceDir: workspace(), autoApprove: "all", tickMs: 5, qaRounds: 0, designRounds: 2 });
+    const project = await orch.run("A notes app");
+    expect(project.phase).toBe("shipped");
+    expect(tasks.filter((t) => t.kind === "design")).toHaveLength(2);
+    const reviews = tasks.filter((t) => t.kind === "feasibility");
+    expect(reviews.map((t) => t.context.finalRound)).toEqual([false, true]);
+    const design = readFileSync(join(project.dir, "docs/design/DESIGN.md"), "utf8");
+    expect(design).toContain("Out of scope for this version (binding)");
+    expect(design).toContain("- Offline mode");
+    // The task creator and tech lead plan from the approved design, cuts included.
+    expect(tasks.find((t) => t.kind === "tickets")!.prompt).toContain("Offline mode");
+    expect(tasks.find((t) => t.kind === "architecture")!.prompt).toContain("Approved design");
+  }, 30_000);
+
+  it("falls back to a monogram when the logo isn't a usable SVG", async () => {
+    const orch = new Orchestrator(new MockRunner({ stepMs: 0, brokenLogo: true }), {
+      workspaceDir: workspace(),
+      autoApprove: "all",
+      tickMs: 5,
+      qaRounds: 0,
+    });
+    const project = await orch.run("A notes app");
+    expect(project.brand?.logoSvg).toContain(">J</text>");
+  }, 30_000);
+
+  it("can run without marketing and design", async () => {
+    const orch = new Orchestrator(new MockRunner({ stepMs: 0 }), {
+      workspaceDir: workspace(),
+      autoApprove: "all",
+      tickMs: 5,
+      qaRounds: 0,
+      marketing: false,
+      design: false,
+    });
+    const project = await orch.run("A notes app");
+    expect(project.phase).toBe("shipped");
+    expect(project.brand).toBeUndefined();
+    expect(orch.board.gates.some((g) => g.kind === "brand" || g.kind === "design")).toBe(false);
+    expect(orch.board.agents.some((a) => a.role === "marketing" || a.role === "designer")).toBe(false);
+  }, 30_000);
 });

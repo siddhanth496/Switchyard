@@ -62,6 +62,64 @@ export const QaReportSchema = z.object({
 });
 export type QaReport = z.infer<typeof QaReportSchema>;
 
+const HEX = z.string().regex(/^#[0-9a-fA-F]{3,8}$/, "colors are hex, like #3346d3");
+
+/** What marketing returns: the name, the logo and how the product talks. */
+export const BrandSchema = z.object({
+  name: z.string().min(1).max(40),
+  alternatives: z.array(z.object({ name: z.string().min(1), why: z.string().default("") })).default([]),
+  tagline: z.string().min(1),
+  positioning: z.string().default(""),
+  audience: z.string().default(""),
+  voice: z.array(z.string()).default([]),
+  /** Words and claims the product never uses. */
+  avoid: z.array(z.string()).default([]),
+  palette: z.array(z.object({ name: z.string().min(1), hex: HEX, use: z.string().default("") })).min(1),
+  typography: z.object({ heading: z.string().default(""), body: z.string().default("") }).default({ heading: "", body: "" }),
+  logoSvg: z.string().min(1),
+  logoNotes: z.string().default(""),
+});
+export type BrandPlan = z.infer<typeof BrandSchema>;
+
+/** What the designer returns: the design system and the key screens. */
+export const DesignSchema = z.object({
+  summary: z.string().min(1),
+  principles: z.array(z.string()).default([]),
+  /** CSS custom properties engineers import, e.g. ":root { --color-primary: #3346d3; }". */
+  tokensCss: z.string().default(""),
+  components: z.array(z.object({ name: z.string().min(1), description: z.string().default("") })).default([]),
+  screens: z
+    .array(
+      z.object({
+        name: z.string().min(1),
+        purpose: z.string().default(""),
+        layout: z.string().default(""),
+        states: z.array(z.string()).default([]),
+        wireframeSvg: z.string().optional(),
+      }),
+    )
+    .min(1),
+});
+export type DesignPlan = z.infer<typeof DesignSchema>;
+
+/** The PM's feasibility call on a design. Its cuts are binding. */
+export const FeasibilitySchema = z.object({
+  verdict: z.enum(["feasible", "changes"]),
+  notes: z.string().default(""),
+  /** Parts of the design that are out of scope for this version. */
+  cuts: z.array(z.string()).default([]),
+});
+export type Feasibility = z.infer<typeof FeasibilitySchema>;
+
+/** Marketing's launch copy for the release. */
+export const LaunchSchema = z.object({
+  headline: z.string().min(1),
+  description: z.string().default(""),
+  highlights: z.array(z.string()).default([]),
+  announcement: z.string().default(""),
+});
+export type Launch = z.infer<typeof LaunchSchema>;
+
 export const ReviewSchema = z.object({
   verdict: z.enum(["approve", "changes"]),
   feedback: z.string().default(""),

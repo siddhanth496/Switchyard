@@ -30,6 +30,8 @@ export interface StartOptions {
   floaters: number;
   budgetUsd: number;
   model?: string;
+  marketing: boolean;
+  design: boolean;
 }
 
 export interface ModelOption {

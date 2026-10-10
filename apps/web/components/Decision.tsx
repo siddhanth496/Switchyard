@@ -5,9 +5,12 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Gate } from "@agentco/engine";
 import { api } from "@/lib/api";
+import { svgUrl } from "@/components/Header";
 
 const FROM: Record<Gate["kind"], string> = {
   prd: "From the PM",
+  brand: "From marketing",
+  design: "From the designer, signed off by the PM",
   architecture: "From the tech lead",
   spend: "From the CFO",
   release: "From the tech lead",
@@ -16,6 +19,8 @@ const FROM: Record<Gate["kind"], string> = {
 
 const APPROVE: Record<Gate["kind"], string> = {
   prd: "Approve the PRD",
+  brand: "Approve the brand",
+  design: "Approve the design",
   architecture: "Approve the architecture",
   spend: "Approve more budget",
   release: "Ship it",
@@ -99,6 +104,16 @@ export function Decision({ gates }: { gates: Gate[] }) {
       <div>
         <h2 id="decision-title">{gate.title}</h2>
         <p className="who">{FROM[gate.kind]}</p>
+        {gate.images && gate.images.length > 0 && (
+          <div className={`gate-images ${gate.kind === "brand" ? "logo" : ""}`}>
+            {gate.images.map((img) => (
+              <figure key={img.title}>
+                <img src={svgUrl(img.svg)} alt={img.title} />
+                <figcaption>{img.title}</figcaption>
+              </figure>
+            ))}
+          </div>
+        )}
         <div className="doc">
           <ReactMarkdown remarkPlugins={[remarkGfm]}>{gate.content}</ReactMarkdown>
         </div>

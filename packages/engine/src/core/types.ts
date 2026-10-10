@@ -10,6 +10,7 @@ export type Role =
   | "tech_lead"
   | "engineer"
   | "designer"
+  | "marketing"
   | "qa"
   | "cfo"
   | "devops";
@@ -130,7 +131,7 @@ export interface Lease {
   acquiredAt: number;
 }
 
-export type GateKind = "prd" | "architecture" | "spend" | "release" | "ticket_failed";
+export type GateKind = "prd" | "brand" | "design" | "architecture" | "spend" | "release" | "ticket_failed";
 export type GateStatus = "pending" | "approved" | "rejected";
 
 export interface Gate {
@@ -143,13 +144,32 @@ export interface Gate {
   feedback?: string;
   /** The ticket a "ticket_failed" gate is about. */
   ticketId?: string;
+  /** Pictures to show with the decision: logo options, wireframes. */
+  images?: GateImage[];
   createdAt: number;
   resolvedAt?: number;
+}
+
+/** An SVG shown on a decision card. Rendered as an image, so scripts in it never run. */
+export interface GateImage {
+  title: string;
+  svg: string;
+}
+
+/** What marketing decided, once the CEO approved it. */
+export interface Brand {
+  name: string;
+  tagline: string;
+  logoSvg: string;
+  /** Brand colors, primary first. */
+  palette: { name: string; hex: string }[];
 }
 
 export type ProjectPhase =
   | "idle"
   | "planning" // PM writing the PRD
+  | "branding" // marketing naming and branding the product
+  | "design" // designer drafting the design, PM checking feasibility
   | "architecture" // tech lead defining areas
   | "ticketing" // task creator breaking down work
   | "building" // dispatcher + engineers running
@@ -167,6 +187,10 @@ export interface Project {
   phase: ProjectPhase;
   budgetUsd: number;
   spentUsd: number;
+  /** Set once the CEO approves marketing's brand. */
+  brand?: Brand;
+  /** Which optional teams take part in this run. */
+  teams?: { marketing: boolean; design: boolean };
   createdAt: number;
 }
 

@@ -3,14 +3,20 @@
 import type { Project, ProjectPhase } from "@agentco/engine";
 import type { Connection } from "@/lib/useBoard";
 
-const PHASES: { label: string; phases: ProjectPhase[] }[] = [
+const PHASES: { label: string; phases: ProjectPhase[]; team?: "marketing" | "design" }[] = [
   { label: "PRD", phases: ["planning"] },
+  { label: "Brand", phases: ["branding"], team: "marketing" },
+  { label: "Design", phases: ["design"], team: "design" },
   { label: "Architecture", phases: ["architecture"] },
   { label: "Tickets", phases: ["ticketing"] },
   { label: "Build", phases: ["building", "paused"] },
   { label: "QA", phases: ["testing"] },
   { label: "Release", phases: ["releasing", "shipped"] },
 ];
+
+export function svgUrl(svg: string): string {
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
 
 export function Header({
   project,
@@ -27,18 +33,26 @@ export function Header({
   onNew: () => void;
   onStop: () => void;
 }) {
-  const current = PHASES.findIndex((p) => p.phases.includes(project.phase));
+  // Older runs have no teams field: they had neither team.
+  const steps = PHASES.filter((p) => !p.team || project.teams?.[p.team]);
+  const current = steps.findIndex((p) => p.phases.includes(project.phase));
   const pct = Math.min(100, (project.spentUsd / project.budgetUsd) * 100);
 
   return (
     <header className="topbar">
       <div className="product">
-        <h1 title={project.idea}>{project.name}</h1>
-        <p>{status}</p>
+        {project.brand && (
+          // An <img> never runs scripts inside an SVG.
+          <img className="logo" src={svgUrl(project.brand.logoSvg)} alt="" width={36} height={36} />
+        )}
+        <div>
+          <h1 title={project.brand ? `${project.brand.tagline}\n\n${project.idea}` : project.idea}>{project.name}</h1>
+          <p>{status}</p>
+        </div>
       </div>
 
       <ol className="phases" aria-label="Progress">
-        {PHASES.map((p, i) => {
+        {steps.map((p, i) => {
           const done = project.phase === "shipped" || i < current;
           const now = i === current && project.phase !== "shipped";
           return (

@@ -17,6 +17,8 @@ export function StartForm({ onCancel }: { onCancel?: () => void }) {
   const [engineers, setEngineers] = useState(1);
   const [floaters, setFloaters] = useState(1);
   const [budget, setBudget] = useState(5);
+  const [marketing, setMarketing] = useState(true);
+  const [design, setDesign] = useState(true);
   const [error, setError] = useState<{ field: "idea" | "key" | "budget" | "form"; message: string } | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -78,6 +80,8 @@ export function StartForm({ onCancel }: { onCancel?: () => void }) {
         engineersPerArea: engineers,
         floaters,
         budgetUsd: budget,
+        marketing,
+        design,
       });
       onCancel?.();
     } catch (err) {
@@ -102,7 +106,7 @@ export function StartForm({ onCancel }: { onCancel?: () => void }) {
       <p className="lede">
         {continuing
           ? "Pick a product the team built before and describe the change. The PM updates the PRD, the team builds only what changed, and QA tests it before you release."
-          : "Describe the product. The PM writes a PRD, the tech lead splits the code into areas, and engineers build tickets in parallel. You approve each step."}
+          : "Describe the product. The PM writes a PRD, marketing names and brands it, the designer designs it, the tech lead splits the code into areas, and engineers build tickets in parallel. You approve each step."}
       </p>
       <form onSubmit={submit} noValidate>
         <div className="mode" role="tablist" aria-label="What to do">
@@ -227,6 +231,32 @@ export function StartForm({ onCancel }: { onCancel?: () => void }) {
             </label>
           </fieldset>
         )}
+
+        <fieldset className="teams">
+          <legend>Teams</legend>
+          <label className="check">
+            <input type="checkbox" checked={marketing} onChange={(e) => setMarketing(e.target.checked)} />
+            <span>
+              Marketing
+              <span className="hint">
+                {continuing
+                  ? "Keeps the product's brand and writes the launch copy for the update."
+                  : "Picks the name, tagline, voice, colors and logo for you to approve, then writes the launch copy."}
+              </span>
+            </span>
+          </label>
+          <label className="check">
+            <input type="checkbox" checked={design} onChange={(e) => setDesign(e.target.checked)} />
+            <span>
+              Design
+              <span className="hint">
+                {continuing
+                  ? "Updates the product's design for the change, if it has one. The PM checks it's feasible."
+                  : "Drafts the design system and key screens. The PM checks it's feasible before it reaches you."}
+              </span>
+            </span>
+          </label>
+        </fieldset>
 
         <div className="grid">
           <label>

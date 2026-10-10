@@ -16,6 +16,8 @@ Options:
   --floaters <n>      Floating engineers (default 1)
   --budget <usd>      Spend before a budget gate (default 20)
   --model <id>        Model for all agents
+  --no-marketing      Skip marketing (brand name, logo, launch copy)
+  --no-design         Skip the designer and the PM's design review
   --workspace <dir>   Where product repos are created (default ./workspace)`;
 
 async function main() {
@@ -29,6 +31,8 @@ async function main() {
       model: { type: "string" },
       workspace: { type: "string", default: "./workspace" },
       help: { type: "boolean", short: "h" },
+      "no-marketing": { type: "boolean", default: false },
+      "no-design": { type: "boolean", default: false },
     },
   });
   const [command, ...rest] = positionals;
@@ -59,6 +63,8 @@ async function main() {
     engineersPerArea: Number(values.engineers ?? 1),
     floaters: Number(values.floaters ?? 1),
     budgetUsd: budget,
+    marketing: !values["no-marketing"],
+    design: !values["no-design"],
     autoApprove: demo || values.auto ? "all" : [],
     tickMs: demo ? 50 : 500,
   });

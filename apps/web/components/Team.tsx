@@ -37,17 +37,31 @@ function AgentCard({ agent }: { agent: Agent }) {
   );
 }
 
+const GROUPS: { title: string; note?: string; roles: Agent["role"][] }[] = [
+  { title: "Leadership", roles: ["pm", "tech_lead", "task_creator", "cfo", "qa"] },
+  { title: "Design", note: "the PM rules on feasibility", roles: ["designer"] },
+  { title: "Marketing", note: "name, logo, voice, launch", roles: ["marketing"] },
+];
+
 export function Team({ agents, areas }: { agents: Agent[]; areas: Area[] }) {
-  const leadership = agents.filter((a) => a.role !== "engineer");
   const floaters = agents.filter((a) => a.role === "engineer" && !a.area);
   return (
     <aside className="team" aria-label="Team">
-      <div className="team-group">
-        <h3>Leadership</h3>
-        {leadership.map((a) => (
-          <AgentCard key={a.id} agent={a} />
-        ))}
-      </div>
+      {GROUPS.map((g) => {
+        const members = agents.filter((a) => g.roles.includes(a.role));
+        if (members.length === 0) return null;
+        return (
+          <div className="team-group" key={g.title}>
+            <h3>
+              {g.title}
+              {g.note && <small>{g.note}</small>}
+            </h3>
+            {members.map((a) => (
+              <AgentCard key={a.id} agent={a} />
+            ))}
+          </div>
+        );
+      })}
       {areas
         .map((area) => (
           <div className="team-group" key={area.id}>

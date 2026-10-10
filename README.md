@@ -1,11 +1,14 @@
 # Agent Company
 
-An AI software company that builds a product from scratch. You are the CEO. A PM, tech lead, task creator, engineers, QA and a CFO work as agents, in parallel, coordinated through a job board.
+An AI software company that builds a product from scratch. You are the CEO. A PM, marketing, a designer, a tech lead, a task creator, engineers, QA and a CFO work as agents, in parallel, coordinated through a job board.
 
 ```
-idea → PRD (you approve) → architecture + ownership areas (you approve)
+idea → PRD (you approve) → brand: name, logo, voice (you approve)
+     → design system + key screens, checked by the PM for feasibility (you approve)
+     → architecture + ownership areas (you approve)
      → tagged tickets → parallel build in git worktrees → review → merge
-     → QA tests the build, files bugs as tickets, re-tests → release (you approve)
+     → QA tests the build, files bugs as tickets, re-tests
+     → marketing writes the launch copy → release (you approve)
 ```
 
 ## Quick start
@@ -26,6 +29,16 @@ pnpm web           # UI on http://localhost:3000
 ```
 
 Pick **Demo agents** in the UI to watch the flow for free, or **Claude agents** for real work. To try the failure flow with demo agents, start the API with `MOCK_FAIL="App shell" pnpm api`: that ticket always fails.
+
+### Marketing and design
+
+Both teams are on by default; untick them on the start screen (or pass `--no-marketing` / `--no-design` to the CLI) to skip them.
+
+- **Marketing** decides how the product is branded: the name (with 2 or 3 alternatives it considered), tagline, positioning, audience, voice rules, colors and an SVG logo. You see the logo and color swatches on the decision card and approve or ask for changes ("make it warmer", "go with Notably"). Once approved, the product takes the name, and the brand is saved to `docs/brand/` (`BRAND.md`, `logo.svg`, `brand.json`). Before the release, marketing writes the launch copy (headline, description, highlights, announcement) in the brand's voice, claiming only what was merged: it's on the release card and in `docs/brand/LAUNCH.md`.
+- **Design**: the designer turns the PRD and brand into a small design system (tokens as CSS custom properties, the few components the screens need) and the key screens with their empty, loading and error states, plus wireframes for up to 3 screens.
+- **The PM has the final call on design feasibility.** Every design goes to the PM before it reaches you. The PM checks each screen serves a user story, nothing exceeds the PRD's scope or a day's build, and the required states are covered, and either signs it off or sends it back with notes. After 2 rounds (`designRounds`), the PM decides: anything still out of reach is listed as a binding cut. If you ask for design changes, the revision goes through the PM again.
+- The approved design lives in `docs/design/` (`DESIGN.md`, `tokens.css`, `wireframes/`). The tech lead and task creator plan from it (including the PM's cuts), the task creator adds an early ticket that brings the tokens into the app, and engineers, the reviewer and QA check UI work against it.
+- **Continuing a product** keeps its brand and name. If it has a design, the designer updates it for the change and the PM checks it again.
 
 ### Changing a product
 
@@ -74,6 +87,7 @@ This is the core of the design.
 - **Failures don't block the build.** A rejected review, failed build or merge conflict sends the ticket back with feedback. The owner gets the first two attempts; the third is **escalated to the tech lead** with the full failure history (and, with Claude agents, the next model up: Haiku → Sonnet → Opus). If that fails too, a decision card asks you to **retry with guidance** or **skip** the ticket. Independent tickets keep building while you decide. Skipped tickets count as resolved: dependents start, told to stub around the missing work, and the release notes list what was skipped. In unattended runs (`--auto`), failed tickets are skipped rather than retried, so a broken ticket can't burn the budget.
 - **QA** tests the merged build against the PRD in a throwaway worktree once the board is clear: it installs, runs tests and walks through the main flows, but never fixes code. Each bug becomes a ticket (tagged *Bug*) in the right area and goes through the normal flow ahead of other work, then QA re-tests. After 2 rounds (`qaRounds`), anything still broken is listed as a known issue on the release card instead of looping. Set `qaRounds: 0` to turn QA off.
 - **Batching:** when no other engineer is free (including ones that could be lent), up to 3 related tickets in one area (same folder, or a chain) are built in one session: one branch, one review, one merge. A rejected batch splits back into single tickets for the retry. Set `maxBatch: 1` to turn it off.
+- **Brand and design spend** (marketing, designer, the PM's reviews) counts toward the budget like any other agent work, before the CFO prices tickets.
 - **CFO budgets:** the task creator sizes each ticket S/M/L; the CFO splits the project budget across tickets by size (1/2/4 units), keeping 25% for reviews, QA and retries. Engineers see their ticket budget in the prompt, and a run is cut off at the budget times a headroom (2x trusted, 1.5x normal, 1x on watch). At the project budget, dispatch pauses until you approve more.
 - **Rewards and penalties:** the CFO scores every delivery and failure: +2 first pass, +1 on budget, +1 efficient (first pass at 60% of budget or less), -1 over budget, -1 sent back, -2 cut off for overspending, -2 when QA traces a bug to the ticket. Cost is never rewarded on its own. The last 5 events set an engineer's standing: *trusted* engineers get first pick of big tickets and more headroom; engineers *on watch* get small tickets, a tight cap and a warning in their prompt; *benched* engineers get no work until two more merges land. Penalties wear off after a few good tickets.
 
@@ -84,7 +98,7 @@ packages/engine/       the company: board, dispatcher, agents, git, orchestrator
   src/core/            types, board store, paths + ownership, dispatcher
   src/agents/          role prompts, output schemas, Claude + mock runners
   src/git/             product repo with one worktree per running ticket
-  src/orchestrator/    the pipeline and build loop
+  src/orchestrator/    the pipeline and build loop; brand and design rendering
   test/                unit tests + end-to-end runs with real git
 apps/server/           Hono API + server-sent events
 apps/web/              Next.js dashboard
@@ -100,7 +114,7 @@ apps/web/              Next.js dashboard
 | GET | `/api/config` | key status (last 4 only), models |
 | PUT | `/api/config/key` | `{ key }` |
 | DELETE | `/api/config/key` | |
-| POST | `/api/projects` | `{ idea, runner?, engineersPerArea?, floaters?, budgetUsd?, model? }` |
+| POST | `/api/projects` | `{ idea, continueFrom?, runner?, engineersPerArea?, floaters?, budgetUsd?, model?, marketing?, design? }` |
 | POST | `/api/gates/:id/approve` | `{ feedback? }` |
 | POST | `/api/gates/:id/reject` | `{ feedback }` |
 | POST | `/api/tickets/:id/retry` | `{ guidance? }` |
@@ -109,7 +123,7 @@ apps/web/              Next.js dashboard
 
 ## What's next
 
-- Designer and QA agents
+- Design QA: the designer reviews the built screens against the design
 - Postgres-backed board so projects survive restarts
 - Per-ticket sandboxes (containers) for engineers
 - Scale agents per area automatically from queue length

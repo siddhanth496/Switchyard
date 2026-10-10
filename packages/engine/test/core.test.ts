@@ -222,3 +222,19 @@ describe("dispatcher", () => {
     expect(plan.assignments).toHaveLength(0);
   });
 });
+
+describe("agent SVGs", () => {
+  it("keeps a clean SVG and strips scripts, handlers and external references", async () => {
+    const { safeSvg } = await import("../src/orchestrator/brand.js");
+    expect(safeSvg("<svg viewBox='0 0 1 1'><rect/></svg>")).toBe(
+      `<svg xmlns="http://www.w3.org/2000/svg" viewBox='0 0 1 1'><rect/></svg>`,
+    );
+    const dirty = safeSvg(
+      `<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"><script>alert(2)</script><image href="https://evil.example/x.png"/><use href="#a"/><a href="javascript:alert(3)"></a></svg>`,
+    )!;
+    expect(dirty).not.toMatch(/onload|<script|evil\.example|javascript:/);
+    expect(dirty).toContain('href="#a"');
+    expect(safeSvg("a blue circle")).toBeUndefined();
+    expect(safeSvg(`<svg>${"x".repeat(50_000)}</svg>`)).toBeUndefined();
+  });
+});

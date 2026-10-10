@@ -70,13 +70,17 @@ const StartSchema = z.object({
   engineersPerArea: z.number().int().min(1).max(6).optional(),
   floaters: z.number().int().min(0).max(6).optional(),
   budgetUsd: z.number().positive().max(1000).optional(),
+  /** Marketing names and brands the product (default on). */
+  marketing: z.boolean().optional(),
+  /** The designer drafts the design and the PM checks feasibility (default on). */
+  design: z.boolean().optional(),
 });
 
 function makeRunner(kind: "mock" | "claude", model: string, budgetUsd: number): AgentRunner {
   if (kind === "mock") {
     // MOCK_FAIL="App shell" makes that demo ticket always fail, to try the failure flow.
     const failBuildsOf = process.env.MOCK_FAIL ? process.env.MOCK_FAIL.split(",") : [];
-    return new MockRunner({ stepMs: 400, rejectFirstReviewOf: ["Notes CRUD API"], failBuildsOf, qaFindsBugOnce: true });
+    return new MockRunner({ stepMs: 400, rejectFirstReviewOf: ["Notes CRUD API"], failBuildsOf, qaFindsBugOnce: true, pmPushesBackDesign: "once" });
   }
   // Cap any single task at a quarter of the budget (min $0.50), so one
   // runaway agent can't blow through it before the CFO gate trips.
@@ -201,6 +205,8 @@ app.post("/api/projects", async (c) => {
       engineersPerArea: body.engineersPerArea ?? 1,
       floaters: body.floaters ?? 1,
       budgetUsd,
+      marketing: body.marketing ?? true,
+      design: body.design ?? true,
     },
     board,
   );

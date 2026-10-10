@@ -1,6 +1,16 @@
 import type { Area, Role, Ticket } from "../core/types.js";
 
-export type TaskKind = "prd" | "architecture" | "tickets" | "build" | "review" | "qa";
+export type TaskKind =
+  | "prd"
+  | "brand"
+  | "design"
+  | "feasibility"
+  | "architecture"
+  | "tickets"
+  | "build"
+  | "review"
+  | "qa"
+  | "launch";
 
 /** One unit of agent work. The orchestrator builds these; runners execute them. */
 export interface AgentTask {
@@ -32,6 +42,15 @@ export interface AgentTask {
     qaRound?: number;
     /** What the CEO asked to change in an existing product. */
     changeRequest?: string;
+    /** The approved brand, as markdown. */
+    brand?: string;
+    /** The design under review or being revised, as markdown. */
+    design?: string;
+    /** Notes from the PM's last feasibility review. */
+    pmNotes?: string;
+    /** Design round, starting at 1; the last one is the PM's final call. */
+    designRound?: number;
+    finalRound?: boolean;
   };
 }
 

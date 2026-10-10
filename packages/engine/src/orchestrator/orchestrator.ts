@@ -3,7 +3,7 @@ import { basename, join, resolve } from "node:path";
 import { Board } from "../core/board.js";
 import { planDispatch, type Assignment } from "../core/dispatcher.js";
 import { anyOverlap, overlaps, resolveArea } from "../core/paths.js";
-import type { Agent, Area, Gate, GateKind, Project, Scorecard, Ticket, TicketSize } from "../core/types.js";
+import type { Agent, Area, Gate, GateImage, GateKind, Project, Scorecard, Ticket, TicketSize } from "../core/types.js";
 import {
   BENCH_MERGES,
   HEADROOM,
@@ -17,7 +17,11 @@ import {
 } from "../core/cfo.js";
 import {
   architecturePrompt,
+  brandPrompt,
   buildPrompt,
+  designPrompt,
+  feasibilityPrompt,
+  launchPrompt,
   prdChangePrompt,
   prdPrompt,
   qaPrompt,
@@ -28,15 +32,22 @@ import {
 import type { AgentResult, AgentRunner, AgentTask } from "../agents/runner.js";
 import {
   ArchitectureSchema,
+  BrandSchema,
   BuildReportSchema,
+  DesignSchema,
+  FeasibilitySchema,
+  LaunchSchema,
   QaReportSchema,
   ReviewSchema,
   TicketPlanSchema,
   parseWith,
   type Architecture,
+  type BrandPlan,
+  type Feasibility,
   type QaReport,
 } from "../agents/schemas.js";
 import { ProjectRepo } from "../git/repo.js";
+import { monogramLogo, paletteSvg, renderBrand, renderDesign, renderLaunch, safeSvg, slugify, toBrand } from "./brand.js";
 
 export interface OrchestratorConfig {
   /** Folder where product repos are created. */
@@ -59,6 +70,12 @@ export interface OrchestratorConfig {
   qaRounds?: number;
   /** Most related tickets one engineer builds in a session (1 turns batching off). */
   maxBatch?: number;
+  /** Marketing names and brands the product, and writes the launch copy. */
+  marketing?: boolean;
+  /** The designer drafts a design system and key screens; the PM checks feasibility. */
+  design?: boolean;
+  /** Designer ↔ PM rounds before the PM makes the final call on scope. */
+  designRounds?: number;
 }
 
 /** Starting .gitignore for every product repo: dependencies, builds, secrets and OS clutter. */
@@ -77,7 +94,15 @@ coverage/
 .DS_Store
 `;
 
-const IDS = { pm: "pm", taskCreator: "task-creator", techLead: "tech-lead", qa: "qa", cfo: "cfo" } as const;
+const IDS = {
+  pm: "pm",
+  taskCreator: "task-creator",
+  techLead: "tech-lead",
+  qa: "qa",
+  cfo: "cfo",
+  marketing: "marketing",
+  designer: "designer",
+} as const;
 
 /**
  * Runs the company: PRD → architecture → tickets → parallel build → release,
@@ -106,6 +131,10 @@ export class Orchestrator {
   private mergeCount = 0;
   private qaNotes: string[] = [];
   private knownIssues: string[] = [];
+  /** The approved brand and design, as markdown, for later prompts. */
+  private brandDoc = "";
+  private designDoc = "";
+  private launchWritten = false;
 
   constructor(
     private readonly runner: AgentRunner,
@@ -124,6 +153,9 @@ export class Orchestrator {
       tickMs: config.tickMs ?? 500,
       qaRounds: config.qaRounds ?? 2,
       maxBatch: config.maxBatch ?? 3,
+      marketing: config.marketing ?? true,
+      design: config.design ?? true,
+      designRounds: Math.max(1, config.designRounds ?? 2),
     };
   }
 
@@ -221,6 +253,7 @@ export class Orchestrator {
       phase: "planning",
       budgetUsd: this.cfg.budgetUsd,
       spentUsd: 0,
+      teams: { marketing: this.cfg.marketing, design: this.cfg.design },
       createdAt: Date.now(),
     };
     this.board.setProject(project);
@@ -234,12 +267,21 @@ export class Orchestrator {
     this.mergeCount = 0;
     this.qaNotes = [];
     this.knownIssues = [];
+    this.brandDoc = "";
+    this.designDoc = "";
+    this.launchWritten = false;
     this.board.addAgent({
       id: IDS.cfo,
       name: "CFO",
       role: "cfo",
       activity: `Budget $${this.cfg.budgetUsd.toFixed(2)}`,
     });
+    if (this.cfg.design) {
+      this.board.addAgent({ id: IDS.designer, name: "Designer", role: "designer", activity: "Design system and key screens" });
+    }
+    if (this.cfg.marketing) {
+      this.board.addAgent({ id: IDS.marketing, name: "Marketing lead", role: "marketing", activity: "Name, logo, voice and launch" });
+    }
     this.repo = new ProjectRepo(dir);
     return project;
   }
@@ -275,7 +317,11 @@ export class Orchestrator {
       });
       await repo.commitToMain({ "docs/PRD.md": this.prd }, this.existing ? "PM: update PRD" : "PM: add PRD");
 
-      // 2. Architecture and areas (an existing product reuses its saved areas)
+      // 2. Brand (marketing), then design (designer, signed off by the PM)
+      await this.brandPhase(idea);
+      await this.designPhase(idea);
+
+      // 3. Architecture and areas (an existing product reuses its saved areas)
       let arch = this.existing ? savedAreas(repo.readMain("docs/areas.json")) : undefined;
       if (arch) {
         this.board.log("info", `Using the existing ownership areas: ${arch.areas.map((a) => a.id).join(", ")}`);
@@ -285,7 +331,7 @@ export class Orchestrator {
           const res = await this.runAgent(IDS.techLead, {
             kind: "architecture",
             systemPrompt: systemPrompts.tech_lead,
-            prompt: architecturePrompt(this.prd, feedback, existingFiles),
+            prompt: architecturePrompt(this.prd, feedback, existingFiles, this.designDoc || undefined),
             cwd: repo.dir,
             canWrite: false,
             context: { prd: this.prd, feedback },
@@ -311,19 +357,25 @@ export class Orchestrator {
         "Tech lead: architecture, areas and owner notes",
       );
 
-      // 3. Tickets (for an existing product: only the requested change)
+      // 4. Tickets (for an existing product: only the requested change)
       this.board.updateProject({ phase: "ticketing" });
       const plan = await this.runAgent(IDS.taskCreator, {
         kind: "tickets",
         systemPrompt: systemPrompts.task_creator,
-        prompt: ticketsPrompt(this.prd, this.architecture, areas, existingFiles ? { request: idea, existingFiles } : undefined),
+        prompt: ticketsPrompt(
+          this.prd,
+          this.architecture,
+          areas,
+          existingFiles ? { request: idea, existingFiles } : undefined,
+          this.designDoc || undefined,
+        ),
         cwd: repo.dir,
         canWrite: false,
         context: { prd: this.prd, areas, changeRequest: this.existing ? idea : undefined },
       });
       this.createTickets(parseWith(TicketPlanSchema, plan.text).tickets, areas, this.existing ? "change" : undefined);
 
-      // 4. Build
+      // 5. Build
       this.board.updateProject({ phase: "building" });
       await this.ensureBuildLoop();
     } catch (err) {
@@ -339,13 +391,13 @@ export class Orchestrator {
   /** Run a step, open a gate on its output, and redo it until the CEO approves. */
   private async untilApproved<T>(
     kind: GateKind,
-    step: (feedback?: string, previous?: string) => Promise<{ title: string; content: string; value: T }>,
+    step: (feedback?: string, previous?: string) => Promise<{ title: string; content: string; value: T; images?: GateImage[] }>,
   ): Promise<T> {
     let feedback: string | undefined;
     let previous: string | undefined;
     for (;;) {
       const out = await step(feedback, previous);
-      const gate = await this.waitForGate(this.board.openGate(kind, out.title, out.content));
+      const gate = await this.waitForGate(this.board.openGate(kind, out.title, out.content, undefined, out.images));
       if (gate.status === "approved") return out.value;
       feedback = gate.feedback;
       previous = out.content;
@@ -368,6 +420,159 @@ export class Orchestrator {
       queueMicrotask(() => this.approve(gate.id, "auto-approved"));
     }
     return p;
+  }
+
+  /**
+   * Marketing names and brands the product: name, tagline, positioning,
+   * voice, colors and logo. The CEO approves it; the product takes the name.
+   * An existing product keeps the brand it has (or its name, if it has none).
+   */
+  private async brandPhase(idea: string): Promise<void> {
+    const repo = this.repo!;
+    const saved = savedBrand(repo.readMain("docs/brand/brand.json"));
+    if (saved) {
+      this.applyBrand(saved);
+      this.board.log("info", `Using the existing brand: ${saved.name}`, { agentId: IDS.marketing });
+      return;
+    }
+    if (!this.cfg.marketing || this.existing) return;
+
+    const plan = await this.untilApproved<BrandPlan>("brand", async (feedback, previous) => {
+      this.board.updateProject({ phase: "branding" });
+      const res = await this.runAgent(IDS.marketing, {
+        kind: "brand",
+        systemPrompt: systemPrompts.marketing,
+        prompt: brandPrompt(idea, this.prd, feedback, previous),
+        cwd: repo.dir,
+        canWrite: false,
+        context: { idea, prd: this.prd, feedback },
+      });
+      const proposed = parseWith(BrandSchema, res.text);
+      const logo = safeSvg(proposed.logoSvg);
+      if (!logo) this.board.log("warn", "Marketing's logo wasn't a usable SVG; showing a monogram instead", { agentId: IDS.marketing });
+      const brand = { ...proposed, logoSvg: logo ?? monogramLogo(proposed.name, proposed.palette[0]?.hex) };
+      return {
+        title: `Approve the brand: ${brand.name}`,
+        content: renderBrand(brand),
+        value: brand,
+        images: [
+          { title: `${brand.name} logo`, svg: brand.logoSvg },
+          { title: "Colors", svg: paletteSvg(brand.palette) },
+        ],
+      };
+    });
+
+    const readme = repo.readMain("README.md").replace(/^# .*$/m, `# ${plan.name}\n\n> ${plan.tagline}`);
+    await repo.commitToMain(
+      {
+        "docs/brand/BRAND.md": renderBrand(plan),
+        "docs/brand/logo.svg": `${plan.logoSvg}\n`,
+        "docs/brand/brand.json": `${JSON.stringify(plan, null, 2)}\n`,
+        "README.md": readme,
+      },
+      `Marketing: brand ${plan.name}, logo and voice`,
+    );
+    this.applyBrand(plan);
+    this.board.log("info", `The product is now ${plan.name}: "${plan.tagline}"`, { agentId: IDS.marketing });
+  }
+
+  private applyBrand(plan: BrandPlan): void {
+    this.brandDoc = renderBrand(plan);
+    this.board.updateProject({ name: plan.name, brand: toBrand(plan) });
+    if (this.board.agents.some((a) => a.id === IDS.marketing)) {
+      this.board.updateAgent(IDS.marketing, { activity: `Brand: ${plan.name}` });
+    }
+  }
+
+  /**
+   * The designer drafts the design system and key screens; the PM checks
+   * it against the PRD and has the final call on scope. They go back and
+   * forth up to `designRounds` times, then the PM's cuts are binding. The
+   * CEO then approves the result. An existing product's design is updated
+   * for the change, if it has one.
+   */
+  private async designPhase(idea: string): Promise<void> {
+    const repo = this.repo!;
+    const current = this.existing ? repo.readMain("docs/design/DESIGN.md") : "";
+    this.designDoc = current;
+    if (!this.cfg.design || (this.existing && !current)) return;
+
+    type Approved = { doc: string; files: Record<string, string> };
+    const approved = await this.untilApproved<Approved>("design", async (feedback, previous) => {
+      this.board.updateProject({ phase: "design" });
+      let pmNotes: string | undefined;
+      let last = previous;
+      for (let round = 1; ; round++) {
+        const final = round >= this.cfg.designRounds;
+        const res = await this.runAgent(IDS.designer, {
+          kind: "design",
+          systemPrompt: systemPrompts.designer,
+          prompt: designPrompt(this.prd, this.brandDoc, {
+            feedback: round === 1 ? feedback : undefined,
+            pmNotes,
+            previous: last,
+            current: current || undefined,
+            change: this.existing ? idea : undefined,
+          }),
+          cwd: repo.dir,
+          canWrite: false,
+          context: { prd: this.prd, brand: this.brandDoc, feedback, pmNotes, designRound: round, changeRequest: this.existing ? idea : undefined },
+        });
+        const design = parseWith(DesignSchema, res.text);
+        const draft = renderDesign(design);
+
+        const check = await this.runAgent(IDS.pm, {
+          kind: "feasibility",
+          systemPrompt: systemPrompts.pm_feasibility,
+          prompt: feasibilityPrompt(this.prd, draft, round, final),
+          cwd: repo.dir,
+          canWrite: false,
+          context: { prd: this.prd, design: draft, designRound: round, finalRound: final },
+        });
+        let review: Feasibility;
+        try {
+          review = parseWith(FeasibilitySchema, check.text);
+        } catch {
+          review = { verdict: "feasible", notes: "", cuts: [] };
+          this.board.log("warn", "The PM's feasibility review was unreadable; treating the design as feasible", { agentId: IDS.pm });
+        }
+        if (review.verdict === "changes" && !final) {
+          pmNotes = [review.notes, ...review.cuts.map((c) => `Cut: ${c}`)].filter(Boolean).join("\n");
+          last = draft;
+          this.board.log("info", `PM sent the design back: ${review.notes || review.cuts.join("; ")}`, { agentId: IDS.pm });
+          continue;
+        }
+        // On the last round the PM's word is final, whatever the verdict: its cuts stand.
+        const cuts = review.cuts;
+        this.board.log(
+          "info",
+          `PM signed off the design${cuts.length ? `, cutting ${cuts.length} item(s) from this version` : ""}`,
+          { agentId: IDS.pm },
+        );
+        const doc = renderDesign(design, { ...review, verdict: "feasible", rounds: round });
+        const files: Record<string, string> = {
+          "docs/design/DESIGN.md": doc,
+          "docs/design/tokens.css": `${design.tokensCss.trim() || tokensFromBrand(this.board.project?.brand?.palette ?? [])}\n`,
+        };
+        const images: GateImage[] = [];
+        for (const screen of design.screens) {
+          const svg = safeSvg(screen.wireframeSvg);
+          if (!svg) continue;
+          files[`docs/design/wireframes/${slugify(screen.name)}.svg`] = `${svg}\n`;
+          images.push({ title: screen.name, svg });
+        }
+        return {
+          title: this.existing ? "Approve the updated design" : "Approve the design",
+          content: doc,
+          value: { doc, files },
+          images,
+        };
+      }
+    });
+
+    await repo.commitToMain(approved.files, this.existing ? "Designer: update the design" : "Designer: design system and key screens");
+    this.designDoc = approved.doc;
+    this.board.updateAgent(IDS.designer, { activity: "Design approved" });
   }
 
   /** Create engineers for each area from the approved architecture. */
@@ -478,7 +683,13 @@ export class Orchestrator {
       const res = await this.runAgent(IDS.taskCreator, {
         kind: "tickets",
         systemPrompt: systemPrompts.task_creator,
-        prompt: ticketsPrompt(this.prd, this.architecture, areas, { request: feedback, existingFiles: await repo.listFiles() }),
+        prompt: ticketsPrompt(
+          this.prd,
+          this.architecture,
+          areas,
+          { request: feedback, existingFiles: await repo.listFiles() },
+          this.designDoc || undefined,
+        ),
         cwd: repo.dir,
         canWrite: false,
         context: { prd: this.prd, areas, changeRequest: feedback },
@@ -623,6 +834,7 @@ export class Orchestrator {
 
   private async release(): Promise<"shipped" | "changes"> {
     this.board.updateProject({ phase: "releasing" });
+    const launch = await this.writeLaunchCopy();
     const log = await this.repo!.log(50);
     const tickets = this.board.tickets;
     const merged = tickets.filter((t) => t.status === "done");
@@ -638,7 +850,7 @@ export class Orchestrator {
 ${skipped.length > 0 ? `\n**Skipped by you:** ${skipped.map((t) => `${t.id} ${t.title}`).join(", ")}. Dependents were built without them, using stubs.\n` : ""}
 **QA:** ${qa}
 ${this.qaNotes.length > 0 ? `\n${this.qaNotes.map((n) => `- ${n}`).join("\n")}\n` : ""}
-**Spend:** $${this.board.project!.spentUsd.toFixed(2)} of $${this.board.project!.budgetUsd.toFixed(2)}
+${launch ? `**Launch copy** (from marketing): ${launch}\n\n` : ""}**Spend:** $${this.board.project!.spentUsd.toFixed(2)} of $${this.board.project!.budgetUsd.toFixed(2)}
 
 **Repo:** \`${this.repo!.dir}\`
 
@@ -665,6 +877,37 @@ ${log.slice(0, 15).map((l) => `- ${l}`).join("\n")}`;
       this.board.log("warn", "No change tickets came out of the feedback; asking for the release again", { agentId: IDS.taskCreator });
     }
     return "changes";
+  }
+
+  /**
+   * Marketing writes the launch copy once, before the first release card,
+   * in the brand's voice and claiming only what was merged. Returns a
+   * one-line summary for the card, or undefined.
+   */
+  private async writeLaunchCopy(): Promise<string | undefined> {
+    const brand = this.board.project?.brand;
+    if (!this.cfg.marketing || !brand || this.launchWritten) return undefined;
+    this.launchWritten = true;
+    const repo = this.repo!;
+    try {
+      const shipped = this.board.tickets.filter((t) => t.status === "done" && t.kind !== "bug");
+      const res = await this.runAgent(IDS.marketing, {
+        kind: "launch",
+        systemPrompt: systemPrompts.marketing,
+        prompt: launchPrompt(this.prd, this.brandDoc, shipped, this.existing ? this.board.project!.idea : undefined),
+        cwd: repo.dir,
+        canWrite: false,
+        context: { prd: this.prd, brand: this.brandDoc, changeRequest: this.existing ? this.board.project!.idea : undefined },
+      });
+      const launch = parseWith(LaunchSchema, res.text);
+      await repo.commitToMain({ "docs/brand/LAUNCH.md": renderLaunch(brand.name, launch) }, "Marketing: launch copy");
+      return `_${launch.headline}_${launch.description ? ` ${launch.description}` : ""} Full copy in \`docs/brand/LAUNCH.md\`.`;
+    } catch (err) {
+      if (!this.abort.signal.aborted) {
+        this.board.log("warn", `Marketing couldn't write the launch copy: ${(err as Error).message}`, { agentId: IDS.marketing });
+      }
+      return undefined;
+    }
   }
 
   private sleepUntilWoken(): Promise<void> {
@@ -1068,7 +1311,18 @@ ${(t.failures ?? []).map((f, i) => `${i + 1}. ${f}`).join("\n")}
     for (const id of ticketIds) this.board.addSpend(agentId, res.costUsd / ticketIds.length, id);
     this.checkBudget();
     if (!opts.keepStatus && task.kind !== "build") {
-      const finished = { prd: "Handed in the PRD", architecture: "Handed in the architecture", tickets: "Filed the tickets", review: "", build: "", qa: "" }[task.kind];
+      const finished = {
+        prd: "Handed in the PRD",
+        brand: "Proposed the brand",
+        design: "Handed in the design",
+        feasibility: "Reviewed the design for feasibility",
+        architecture: "Handed in the architecture",
+        tickets: "Filed the tickets",
+        launch: "Wrote the launch copy",
+        review: "",
+        build: "",
+        qa: "",
+      }[task.kind];
       this.board.updateAgent(agentId, {
         status: prevStatus === "working" ? "working" : "idle",
         ...(res.ok && finished ? { activity: finished } : {}),
@@ -1122,6 +1376,23 @@ function productName(dir: string): string {
   const readme = existsSync(join(dir, "README.md")) ? readFileSync(join(dir, "README.md"), "utf8") : "";
   const heading = readme.match(/^#\s+(.+)$/m)?.[1]?.trim();
   return heading || basename(dir).replace(/-[a-z0-9]{6,9}$/, "");
+}
+
+/** The brand saved by an earlier run, if it parses and its logo is usable. */
+function savedBrand(json: string): BrandPlan | undefined {
+  if (!json.trim()) return undefined;
+  try {
+    const plan = BrandSchema.parse(JSON.parse(json));
+    return { ...plan, logoSvg: safeSvg(plan.logoSvg) ?? monogramLogo(plan.name, plan.palette[0]?.hex) };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Fallback tokens when the designer gave none: the brand colors as custom properties. */
+function tokensFromBrand(palette: { name: string; hex: string }[]): string {
+  const colors = palette.map((c) => `  --color-${slugify(c.name)}: ${c.hex};`).join("\n");
+  return `:root {\n${colors}${colors ? "\n" : ""}  --space-1: 4px;\n  --space-2: 8px;\n  --space-3: 16px;\n  --radius: 8px;\n  --font-body: system-ui, sans-serif;\n}`;
 }
 
 /** Ownership areas saved by an earlier run, if they parse. */

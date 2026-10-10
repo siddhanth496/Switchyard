@@ -120,7 +120,7 @@ export function Board({ tickets, agents, areas }: { tickets: Ticket[]; agents: A
     return (
       <section className="board" aria-label="Job board">
         <div className="column">
-          <p className="empty">Tickets appear here once the PRD and architecture are approved.</p>
+          <p className="empty">Tickets appear here once you approve the plan.</p>
         </div>
       </section>
     );

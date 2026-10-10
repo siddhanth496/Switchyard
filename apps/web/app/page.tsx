@@ -37,6 +37,10 @@ export default function Home() {
     : ({
         idle: "Starting up",
         planning: "PM is writing the PRD",
+        branding: "Marketing is naming and branding the product",
+        design: state.agents.find((a) => a.id === "pm")?.status === "working"
+          ? "PM is checking the design for feasibility"
+          : "Designer is drafting the design",
         architecture: "Tech lead is designing the architecture",
         ticketing: "Task creator is filing tickets",
         building: `${merged} of ${total} tickets merged`,

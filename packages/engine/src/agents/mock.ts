@@ -17,6 +17,10 @@ export interface MockRunnerOptions {
   overspendFirstBuildOf?: string[];
   /** Cost of building one ticket, in USD (default 0.02). */
   buildCostUsd?: number;
+  /** The PM sends the first design back (and keeps cutting on later rounds when "always"). */
+  pmPushesBackDesign?: "once" | "always";
+  /** Marketing's logo is not a usable SVG, to test the fallback. */
+  brokenLogo?: boolean;
 }
 
 /**
@@ -36,8 +40,12 @@ export class MockRunner implements AgentRunner {
   private readonly overspendOnce: string[];
   private readonly overspent = new Set<string>();
   private readonly buildCost: number;
+  private readonly pmPushback?: "once" | "always";
+  private readonly brokenLogo: boolean;
 
   constructor(options: MockRunnerOptions = {}) {
+    this.pmPushback = options.pmPushesBackDesign;
+    this.brokenLogo = options.brokenLogo ?? false;
     this.overspendOnce = options.overspendFirstBuildOf ?? [];
     this.buildCost = options.buildCostUsd ?? 0.02;
     this.qaFindsBugOnce = options.qaFindsBugOnce ?? false;
@@ -60,6 +68,52 @@ export class MockRunner implements AgentRunner {
         await step("Drafting user stories");
         await step("Writing the PRD");
         return ok(mockPrd(task.context.idea ?? "", task.context.feedback), 0.01);
+      }
+      case "brand": {
+        await step("Studying the audience");
+        await step("Shortlisting names");
+        await step("Drawing the logo");
+        const plan = {
+          ...MOCK_BRAND,
+          tagline: task.context.feedback ? `${MOCK_BRAND.tagline} (revised)` : MOCK_BRAND.tagline,
+          logoSvg: this.brokenLogo ? "a blue circle with a pen" : MOCK_BRAND.logoSvg,
+        };
+        return ok(`Here's the brand.\n\n\`\`\`json\n${JSON.stringify(plan)}\n\`\`\``, 0.01);
+      }
+      case "design": {
+        const round = task.context.designRound ?? 1;
+        await step("Reading the PRD and the brand");
+        await step("Setting up tokens and components");
+        await step("Wireframing the key screens");
+        const design = {
+          ...MOCK_DESIGN,
+          summary: `${MOCK_DESIGN.summary}${task.context.pmNotes ? " Revised per the PM: offline mode removed." : ""}${
+            task.context.feedback ? ` Revised per the CEO: ${task.context.feedback}` : ""
+          }${task.context.changeRequest ? ` Updated for: ${task.context.changeRequest}` : ""}`,
+          screens: round > 1 || !this.pmPushback ? MOCK_DESIGN.screens : [...MOCK_DESIGN.screens, MOCK_OFFLINE_SCREEN],
+        };
+        return ok(`\`\`\`json\n${JSON.stringify(design)}\n\`\`\``, 0.01);
+      }
+      case "feasibility": {
+        const round = task.context.designRound ?? 1;
+        await step(`Checking the design against the PRD (round ${round})`);
+        const pushBack = this.pmPushback === "always" || (this.pmPushback === "once" && round === 1);
+        const review = pushBack
+          ? task.context.finalRound
+            ? { verdict: "feasible", notes: "Final call: ship without offline mode.", cuts: ["Offline mode"] }
+            : { verdict: "changes", notes: "Offline sync isn't in the PRD and won't fit in a day.", cuts: ["Offline mode"] }
+          : { verdict: "feasible", notes: "Every screen maps to a user story and fits v1.", cuts: [] };
+        return ok(`\`\`\`json\n${JSON.stringify(review)}\n\`\`\``, 0.005);
+      }
+      case "launch": {
+        await step("Writing the launch copy");
+        const launch = {
+          headline: "Notes that keep up with you",
+          description: "Jotter is the quickest place to write something down and find it again.",
+          highlights: ["Sign in with email", "Create, edit and delete notes", "Newest notes first"],
+          announcement: "Jotter is live. Sign in, write a note, and it's there next time.",
+        };
+        return ok(`\`\`\`json\n${JSON.stringify(launch)}\n\`\`\``, 0.005);
       }
       case "architecture": {
         await step("Reviewing the PRD");
@@ -190,6 +244,72 @@ Sharing, tags, rich text, mobile apps.
 ## Open questions
 - Do we need password reset in v1?`;
 }
+
+const MOCK_BRAND = {
+  name: "Jotter",
+  alternatives: [
+    { name: "Notably", why: "friendly, but close to existing apps" },
+    { name: "Scribbly", why: "playful, harder to take seriously at work" },
+  ],
+  tagline: "Write it down. Find it fast.",
+  positioning: "For people who think faster than their notes app. Jotter opens straight to a blank note, with nothing to set up.",
+  audience: "Busy individuals who jot down ideas, lists and reminders through the day.",
+  voice: ["Short and plain: 'Note saved', not 'Your note has been successfully persisted'", "Warm, never cute"],
+  avoid: ["synergy", "revolutionary"],
+  palette: [
+    { name: "Ink", hex: "#1f3a5f", use: "primary buttons and links" },
+    { name: "Paper", hex: "#f7f4ed", use: "page background" },
+    { name: "Marker", hex: "#f2b134", use: "highlights, sparingly" },
+  ],
+  typography: { heading: "Georgia, serif", body: "system-ui, sans-serif" },
+  logoSvg:
+    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='14' fill='#1f3a5f'/><rect x='16' y='14' width='32' height='38' rx='4' fill='#f7f4ed'/><rect x='22' y='24' width='20' height='3' rx='1.5' fill='#1f3a5f'/><rect x='22' y='32' width='14' height='3' rx='1.5' fill='#1f3a5f'/><circle cx='46' cy='46' r='8' fill='#f2b134'/></svg>",
+  logoNotes: "A page with two lines, and a marker dot for the idea you just had.",
+};
+
+const wire = (title: string, rows: string) =>
+  `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 360 640'><rect width='360' height='640' fill='#f7f4ed'/><rect x='0' y='0' width='360' height='56' fill='#1f3a5f'/><text x='20' y='35' font-family='sans-serif' font-size='18' fill='#fff'>${title}</text>${rows}</svg>`;
+
+const MOCK_DESIGN = {
+  summary: "Calm paper tones, one strong ink color, generous spacing. Every screen works one-handed on a phone.",
+  principles: ["One primary action per screen", "Show the empty state as an invitation"],
+  tokensCss:
+    ":root {\n  --color-primary: #1f3a5f;\n  --color-bg: #f7f4ed;\n  --color-accent: #f2b134;\n  --color-text: #1c2533;\n  --space-1: 4px;\n  --space-2: 8px;\n  --space-3: 16px;\n  --radius: 8px;\n  --font-body: system-ui, sans-serif;\n  --font-heading: Georgia, serif;\n}",
+  components: [
+    { name: "Button", description: "Primary (ink) and secondary (outline); hover, focus ring, disabled" },
+    { name: "Note card", description: "Title, first line, time; tap to edit" },
+    { name: "Text field", description: "Label above, error text below in red" },
+  ],
+  screens: [
+    {
+      name: "Sign in",
+      purpose: "Get people to their notes.",
+      layout: "Logo, email and password fields, one Sign in button.",
+      states: ["error: wrong password", "loading: button shows a spinner"],
+      wireframeSvg: wire(
+        "Sign in",
+        "<rect x='40' y='160' width='280' height='44' rx='8' fill='#fff' stroke='#bbb'/><rect x='40' y='224' width='280' height='44' rx='8' fill='#fff' stroke='#bbb'/><rect x='40' y='300' width='280' height='48' rx='8' fill='#1f3a5f'/>",
+      ),
+    },
+    {
+      name: "Notes list",
+      purpose: "See and open notes, newest first.",
+      layout: "Header with a New note button, then note cards.",
+      states: ["empty: 'No notes yet' with a New note button", "loading: three grey card placeholders", "error: retry banner"],
+      wireframeSvg: wire(
+        "Notes",
+        "<rect x='20' y='76' width='320' height='72' rx='8' fill='#fff' stroke='#ddd'/><rect x='20' y='160' width='320' height='72' rx='8' fill='#fff' stroke='#ddd'/><rect x='20' y='244' width='320' height='72' rx='8' fill='#fff' stroke='#ddd'/><circle cx='310' cy='590' r='26' fill='#f2b134'/>",
+      ),
+    },
+  ],
+};
+
+const MOCK_OFFLINE_SCREEN = {
+  name: "Offline mode",
+  purpose: "Keep writing without a connection and sync later.",
+  layout: "Banner showing sync status; queued notes marked.",
+  states: ["offline", "syncing", "conflict"],
+};
 
 const MOCK_ARCHITECTURE = `Plain HTML front end, a small TypeScript API and SQLite.
 

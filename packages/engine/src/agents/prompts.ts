@@ -50,6 +50,21 @@ and mention it in your report.
 {"summary": "what you built", "notes": "anything the next engineer in this area must know (decisions, gotchas, interfaces); empty if nothing"}
 \`\`\``,
 
+  qa: `${COMPANY}
+
+Role: QA Engineer. You test the merged product against the PRD's acceptance criteria. You never fix code.
+How to test:
+- Read the README, docs/PRD.md and docs/ARCHITECTURE.md, then the code.
+- If the project can be installed, built, tested or started, do it and exercise the main user flows. Stop any \
+server you start before you finish.
+- Anything you change in this folder is thrown away; only your report counts.
+Report only real, reproducible problems: missing acceptance criteria, crashes, broken flows, failing tests. \
+Not style nits. For each bug give steps, what you expected, and the files most likely at fault.
+Finish with a JSON block:
+\`\`\`json
+{"verdict": "pass" | "bugs", "summary": "what you tested and how", "bugs": [{"title": "...", "description": "...", "steps": ["..."], "expected": "...", "files": ["web/login.html"], "severity": "high" | "medium" | "low"}]}
+\`\`\``,
+
   reviewer: `${COMPANY}
 
 Role: Reviewer (Tech Lead). You review one ticket's diff against its acceptance criteria.
@@ -123,6 +138,35 @@ ${ownerNotes.trim() || "(none yet)"}
 
 Product context (PRD):
 ${prd}`;
+}
+
+export function qaPrompt(
+  prd: string,
+  merged: Ticket[],
+  areas: Area[],
+  round: number,
+  earlierBugs: { title: string; fixed: boolean }[],
+): string {
+  const areaList = areas.map((a) => `- ${a.id}: ${a.paths.join(", ")}`).join("\n");
+  const work = merged
+    .map((t) => `- ${t.id} ${t.title}${t.acceptance.length ? `: ${t.acceptance.join("; ")}` : ""}`)
+    .join("\n");
+  const previous = earlierBugs.length
+    ? `\nThis is QA round ${round}. Bugs from earlier rounds (verify the fixed ones; do not re-report a fixed bug unless it is still broken):
+${earlierBugs.map((b) => `- ${b.title}${b.fixed ? " (marked fixed)" : " (still open)"}`).join("\n")}
+`
+    : "";
+  return `Test the merged build on main.
+
+PRD:
+${prd}
+
+Work merged so far:
+${work}
+
+Code areas (use these paths when you name the files at fault):
+${areaList}
+${previous}`;
 }
 
 export function reviewPrompt(ticket: Ticket, diff: string): string {

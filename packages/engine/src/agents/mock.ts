@@ -9,6 +9,10 @@ export interface MockRunnerOptions {
   rejectFirstReviewOf?: string[];
   /** Ticket titles (substring match) whose builds always fail, to demo the failure flow. */
   failBuildsOf?: string[];
+  /** QA reports one bug in its first round, to demo the bug-fix loop. */
+  qaFindsBugOnce?: boolean;
+  /** QA reports this bug every round, to test the round limit. */
+  qaAlwaysFinds?: string;
 }
 
 /**
@@ -22,8 +26,12 @@ export class MockRunner implements AgentRunner {
   private readonly rejectOnce: string[];
   private readonly rejected = new Set<string>();
   private readonly alwaysFail: string[];
+  private readonly qaFindsBugOnce: boolean;
+  private readonly qaAlwaysFinds?: string;
 
   constructor(options: MockRunnerOptions = {}) {
+    this.qaFindsBugOnce = options.qaFindsBugOnce ?? false;
+    this.qaAlwaysFinds = options.qaAlwaysFinds;
     this.stepMs = options.stepMs ?? 250;
     this.rejectOnce = options.rejectFirstReviewOf ?? [];
     this.alwaysFail = options.failBuildsOf ?? [];
@@ -77,6 +85,31 @@ export class MockRunner implements AgentRunner {
           })}\n\`\`\``,
           0.02,
         );
+      }
+      case "qa": {
+        const round = task.context.qaRound ?? 1;
+        await step("Reading the PRD and acceptance criteria");
+        await step("Installing and starting the app");
+        await step("Testing sign-in and the notes flows");
+        const bugs = [];
+        if (this.qaAlwaysFinds) {
+          bugs.push({ title: this.qaAlwaysFinds, description: "Still broken.", files: ["web/notes.html"], severity: "high" });
+        } else if (this.qaFindsBugOnce && round === 1) {
+          bugs.push({
+            title: "Empty notes list shows a blank page",
+            description: "With no notes, the list page renders nothing at all.",
+            steps: ["Sign in as a new user", "Open the notes page"],
+            expected: "A friendly empty state with a button to create the first note",
+            files: ["web/notes.html"],
+            severity: "medium",
+          });
+        }
+        const report = {
+          verdict: bugs.length ? "bugs" : "pass",
+          summary: `Round ${round}: ran the app and walked through sign-in, create, edit and delete.`,
+          bugs,
+        };
+        return ok(`\`\`\`json\n${JSON.stringify(report)}\n\`\`\``, 0.01);
       }
       case "review": {
         const t = task.context.ticket!;

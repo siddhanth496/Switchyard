@@ -40,9 +40,10 @@ export default function Home() {
         architecture: "Tech lead is designing the architecture",
         ticketing: "Task creator is filing tickets",
         building: `${merged} of ${total} tickets merged`,
+        testing: "QA is testing the build",
         paused: "Paused at the budget",
         releasing: "Ready to release",
-        shipped: `Shipped with all ${total} tickets merged`,
+        shipped: merged === total ? `Shipped with all ${total} tickets merged` : `Shipped with ${merged} of ${total} tickets merged`,
         failed: "Stopped. Retry failed tickets to continue.",
       } as const)[state.project.phase];
 

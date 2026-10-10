@@ -224,3 +224,63 @@ async function waitFor<T>(fn: () => T | undefined, timeoutMs = 10_000): Promise<
     await new Promise((r) => setTimeout(r, 10));
   }
 }
+
+describe("QA", () => {
+  function counting(inner: MockRunner) {
+    const calls = { qa: 0 };
+    const runner: AgentRunner = {
+      name: "counting",
+      run: (task, onActivity) => {
+        if (task.kind === "qa") calls.qa++;
+        return inner.run(task, onActivity);
+      },
+    };
+    return { calls, runner };
+  }
+
+  it("files the bugs it finds as tickets, re-tests after the fix, then releases", async () => {
+    const { calls, runner } = counting(new MockRunner({ stepMs: 0, qaFindsBugOnce: true }));
+    const orch = new Orchestrator(runner, { workspaceDir: workspace(), autoApprove: "all", tickMs: 5 });
+    const phases: string[] = [];
+    orch.board.on((e) => {
+      if (e.type === "project" && e.project && phases.at(-1) !== e.project.phase) phases.push(e.project.phase);
+    });
+
+    const project = await orch.run("A notes app");
+    expect(project.phase).toBe("shipped");
+    expect(calls.qa).toBe(2);
+    expect(phases).toEqual(expect.arrayContaining(["building", "testing", "releasing", "shipped"]));
+    // building → testing → building (the bug) → testing → releasing
+    expect(phases.filter((p) => p === "testing")).toHaveLength(2);
+
+    const bug = orch.board.tickets.find((t) => t.kind === "bug")!;
+    expect(bug.title).toBe("Bug: Empty notes list shows a blank page");
+    expect(bug.area).toBe("web");
+    expect(bug.status).toBe("done");
+    expect(bug.description).toContain("Steps to reproduce");
+
+    const release = orch.board.gates.find((g) => g.kind === "release")!;
+    expect(release.content).toContain("**QA:** passed, after fixing 1 bug(s)");
+    // QA worked in throwaway worktrees; nothing of theirs is left behind.
+    expect(git(project.dir, "branch", "--list", "ticket/QA-*").trim()).toBe("");
+  }, 30_000);
+
+  it("stops after its last round and lists what is still broken as known issues", async () => {
+    const { calls, runner } = counting(new MockRunner({ stepMs: 0, qaAlwaysFinds: "Sync loses edits" }));
+    const orch = new Orchestrator(runner, { workspaceDir: workspace(), autoApprove: "all", tickMs: 5, qaRounds: 2 });
+    const project = await orch.run("A notes app");
+    expect(project.phase).toBe("shipped");
+    expect(calls.qa).toBe(2);
+    expect(orch.board.tickets.filter((t) => t.kind === "bug")).toHaveLength(1);
+    const release = orch.board.gates.find((g) => g.kind === "release")!;
+    expect(release.content).toContain("1 known issue(s) still open: Sync loses edits (high)");
+  }, 30_000);
+
+  it("can be turned off", async () => {
+    const { calls, runner } = counting(new MockRunner({ stepMs: 0, qaFindsBugOnce: true }));
+    const orch = new Orchestrator(runner, { workspaceDir: workspace(), autoApprove: "all", tickMs: 5, qaRounds: 0 });
+    await orch.run("A notes app");
+    expect(calls.qa).toBe(0);
+    expect(orch.board.gates.find((g) => g.kind === "release")!.content).toContain("**QA:** turned off");
+  }, 30_000);
+});

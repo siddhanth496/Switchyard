@@ -1,6 +1,6 @@
 import type { Area, Role, Ticket } from "../core/types.js";
 
-export type TaskKind = "prd" | "architecture" | "tickets" | "build" | "review";
+export type TaskKind = "prd" | "architecture" | "tickets" | "build" | "review" | "qa";
 
 /** One unit of agent work. The orchestrator builds these; runners execute them. */
 export interface AgentTask {
@@ -24,6 +24,8 @@ export interface AgentTask {
     areas?: Area[];
     ticket?: Ticket;
     diff?: string;
+    /** QA round, starting at 1. */
+    qaRound?: number;
   };
 }
 

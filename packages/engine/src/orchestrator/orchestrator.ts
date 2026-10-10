@@ -7,6 +7,7 @@ import {
   architecturePrompt,
   buildPrompt,
   prdPrompt,
+  qaPrompt,
   reviewPrompt,
   systemPrompts,
   ticketsPrompt,
@@ -15,10 +16,12 @@ import type { AgentResult, AgentRunner, AgentTask } from "../agents/runner.js";
 import {
   ArchitectureSchema,
   BuildReportSchema,
+  QaReportSchema,
   ReviewSchema,
   TicketPlanSchema,
   parseWith,
   type Architecture,
+  type QaReport,
 } from "../agents/schemas.js";
 import { ProjectRepo } from "../git/repo.js";
 
@@ -39,9 +42,11 @@ export interface OrchestratorConfig {
   autoApprove?: GateKind[] | "all";
   /** How often the dispatcher re-checks the board, in ms. */
   tickMs?: number;
+  /** QA test rounds before release (0 turns QA off). Bugs from the last round become known issues. */
+  qaRounds?: number;
 }
 
-const IDS = { pm: "pm", taskCreator: "task-creator", techLead: "tech-lead", cfo: "cfo" } as const;
+const IDS = { pm: "pm", taskCreator: "task-creator", techLead: "tech-lead", qa: "qa", cfo: "cfo" } as const;
 
 /**
  * Runs the company: PRD → architecture → tickets → parallel build → release,
@@ -62,6 +67,9 @@ export class Orchestrator {
   private pipeline: Promise<void> | null = null;
   private buildLoop: Promise<void> | null = null;
   private abort = new AbortController();
+  private qaRound = 0;
+  private qaNotes: string[] = [];
+  private knownIssues: string[] = [];
 
   constructor(
     private readonly runner: AgentRunner,
@@ -78,6 +86,7 @@ export class Orchestrator {
       lendThreshold: config.lendThreshold ?? 2,
       autoApprove: config.autoApprove ?? [],
       tickMs: config.tickMs ?? 500,
+      qaRounds: config.qaRounds ?? 2,
     };
   }
 
@@ -179,6 +188,10 @@ export class Orchestrator {
     this.board.addAgent({ id: IDS.pm, name: "PM", role: "pm" });
     this.board.addAgent({ id: IDS.techLead, name: "Tech lead", role: "tech_lead" });
     this.board.addAgent({ id: IDS.taskCreator, name: "Task creator", role: "task_creator" });
+    this.board.addAgent({ id: IDS.qa, name: "QA", role: "qa", activity: "Tests the build before release" });
+    this.qaRound = 0;
+    this.qaNotes = [];
+    this.knownIssues = [];
     this.board.addAgent({
       id: IDS.cfo,
       name: "CFO",
@@ -330,16 +343,7 @@ export class Orchestrator {
     const areaIds = new Set(areas.map((a) => a.id));
 
     for (const p of planned) {
-      const res = resolveArea(p.files, areas);
-      let area: string;
-      if (res.kind === "single") {
-        area = res.area;
-      } else {
-        area = p.area && areaIds.has(p.area) ? p.area : (areas.find((a) => a.shared) ?? areas[0]!).id;
-        const why =
-          res.kind === "split" ? `spans areas ${res.areas.join(", ")}` : `has unowned files ${res.files.join(", ")}`;
-        this.board.log("warn", `Ticket "${p.title}" ${why}; assigned to ${area}`);
-      }
+      const area = this.areaFor(p.files, p.area && areaIds.has(p.area) ? p.area : undefined, p.title, areas);
       const dependsOn = p.dependsOn.flatMap((k) => {
         const id = idByKey.get(k);
         if (!id) this.board.log("warn", `Ticket "${p.title}" depends on unknown key "${k}"; ignored`);
@@ -360,6 +364,23 @@ export class Orchestrator {
     this.board.log("info", `Task creator filed ${planned.length} tickets`);
   }
 
+  /** The area owning a ticket's files; falls back to a hint, then the shared area. */
+  private areaFor(files: string[], hint: string | undefined, title: string, areas: Area[]): string {
+    const res = resolveArea(files, areas);
+    if (res.kind === "single") return res.area;
+    const nonShared = areas.find((a) => !a.shared);
+    const fromSplit = res.kind === "split" ? res.areas[0] : undefined;
+    const area = hint ?? fromSplit ?? (areas.find((a) => a.shared) ?? nonShared ?? areas[0]!).id;
+    const why =
+      files.length === 0
+        ? "lists no files"
+        : res.kind === "split"
+          ? `spans areas ${res.areas.join(", ")}`
+          : `has unowned files ${res.files.join(", ")}`;
+    this.board.log("warn", `Ticket "${title}" ${why}; assigned to ${area}`);
+    return area;
+  }
+
   // ---- build loop ------------------------------------------------------
 
   private ensureBuildLoop(): Promise<void> {
@@ -371,7 +392,22 @@ export class Orchestrator {
     return this.buildLoop;
   }
 
+  /** Build until the board is clear, let QA test, repeat for its bugs, then release. */
   private async build(): Promise<void> {
+    for (;;) {
+      const outcome = await this.dispatchUntilDone();
+      if (outcome !== "done") return;
+      if (this.qaRound >= this.cfg.qaRounds) break;
+      const filed = await this.runQa();
+      if (this.abort.signal.aborted) return;
+      if (filed === 0) break;
+      this.board.updateProject({ phase: "building" });
+    }
+    await this.release();
+  }
+
+  /** Dispatch until every ticket is merged or skipped. */
+  private async dispatchUntilDone(): Promise<"done" | "stuck" | "aborted"> {
     let stuck: string[] = [];
     while (!this.abort.signal.aborted) {
       const project = this.board.project!;
@@ -398,20 +434,110 @@ export class Orchestrator {
       await this.sleepUntilWoken();
     }
     await Promise.allSettled(this.running.values());
-    if (this.abort.signal.aborted) return;
-
+    if (this.abort.signal.aborted) return "aborted";
     if (stuck.length > 0) {
       this.board.updateProject({ phase: "failed" });
       this.board.log("error", `Build stopped, blocked: ${stuck.join("; ")}`);
-      return;
+      return "stuck";
+    }
+    return "done";
+  }
+
+  /**
+   * QA tests the merged build in a throwaway worktree and files bugs as
+   * tickets. Returns how many it filed. On the last round, bugs are kept
+   * as known issues for the release card instead of looping forever.
+   */
+  private async runQa(): Promise<number> {
+    const repo = this.repo!;
+    const round = ++this.qaRound;
+    this.board.updateProject({ phase: "testing" });
+    this.board.log("info", `QA round ${round}: testing the merged build`, { agentId: IDS.qa });
+
+    const scratch = `QA-${round}`;
+    const dir = await repo.openWorktree(scratch);
+    const merged = this.board.tickets.filter((t) => t.status === "done");
+    const earlier = this.board.tickets
+      .filter((t) => t.kind === "bug")
+      .map((t) => ({ title: t.title.replace(/^Bug: /, ""), fixed: t.status === "done" }));
+    let report: QaReport;
+    try {
+      const res = await this.runAgent(IDS.qa, {
+        kind: "qa",
+        systemPrompt: systemPrompts.qa,
+        prompt: qaPrompt(this.prd, merged, [...this.board.areas], round, earlier),
+        cwd: dir,
+        canWrite: true,
+        maxTurns: 40,
+        context: { qaRound: round, prd: this.prd },
+      });
+      report = parseWith(QaReportSchema, res.text);
+    } catch (err) {
+      if (this.abort.signal.aborted) return 0;
+      const why = (err as Error).message;
+      this.qaNotes.push(`Round ${round}: QA couldn't finish (${why}).`);
+      this.board.log("warn", `QA round ${round} couldn't finish: ${why}`, { agentId: IDS.qa });
+      return 0;
+    } finally {
+      await repo.closeWorktree(scratch, true);
     }
 
+    if (report.verdict === "pass" || report.bugs.length === 0) {
+      this.qaNotes.push(`Round ${round}: passed. ${report.summary}`.trim());
+      this.board.updateAgent(IDS.qa, { activity: `Round ${round} passed` });
+      this.board.log("info", `QA round ${round} passed`, { agentId: IDS.qa });
+      return 0;
+    }
+
+    if (round >= this.cfg.qaRounds) {
+      this.knownIssues = report.bugs.map((b) => `${b.title} (${b.severity})`);
+      this.qaNotes.push(`Round ${round}: ${report.bugs.length} issue(s) still open. ${report.summary}`.trim());
+      this.board.updateAgent(IDS.qa, { activity: `Round ${round}: ${report.bugs.length} still open` });
+      this.board.log("warn", `QA round ${round} still found ${report.bugs.length} bug(s); listed as known issues`, {
+        agentId: IDS.qa,
+      });
+      return 0;
+    }
+
+    const areas = [...this.board.areas];
+    for (const bug of report.bugs) {
+      const area = this.areaFor(bug.files, undefined, `Bug: ${bug.title}`, areas);
+      const steps = bug.steps.length ? `\n\nSteps to reproduce:\n${bug.steps.map((x, i) => `${i + 1}. ${x}`).join("\n")}` : "";
+      this.board.addTicket({
+        title: `Bug: ${bug.title}`,
+        description: `${bug.description}${steps}${bug.expected ? `\n\nExpected: ${bug.expected}` : ""}\n\nFound by QA in round ${round} (${bug.severity}).`,
+        acceptance: [bug.expected || "The bug no longer reproduces"],
+        area,
+        files: bug.files,
+        dependsOn: [],
+        priority: 0,
+        status: "ready",
+        kind: "bug",
+      });
+    }
+    this.qaNotes.push(`Round ${round}: filed ${report.bugs.length} bug(s). ${report.summary}`.trim());
+    this.board.updateAgent(IDS.qa, { activity: `Round ${round}: filed ${report.bugs.length} bug(s)` });
+    this.board.log("warn", `QA round ${round} filed ${report.bugs.length} bug(s)`, { agentId: IDS.qa });
+    return report.bugs.length;
+  }
+
+  private async release(): Promise<void> {
     this.board.updateProject({ phase: "releasing" });
     const log = await this.repo!.log(50);
-    const merged = this.board.tickets.filter((t) => t.status === "done");
-    const skipped = this.board.tickets.filter((t) => t.status === "skipped");
-    const summary = `${merged.length} of ${this.board.tickets.length} tickets merged into main.
+    const tickets = this.board.tickets;
+    const merged = tickets.filter((t) => t.status === "done");
+    const skipped = tickets.filter((t) => t.status === "skipped");
+    const bugsFixed = tickets.filter((t) => t.kind === "bug" && t.status === "done").length;
+    const qa =
+      this.cfg.qaRounds === 0
+        ? "turned off"
+        : this.knownIssues.length > 0
+          ? `${this.knownIssues.length} known issue(s) still open: ${this.knownIssues.join("; ")}`
+          : `passed${bugsFixed > 0 ? `, after fixing ${bugsFixed} bug(s) it found` : ""}`;
+    const summary = `${merged.length} of ${tickets.length} tickets merged into main.
 ${skipped.length > 0 ? `\n**Skipped by you:** ${skipped.map((t) => `${t.id} ${t.title}`).join(", ")}. Dependents were built without them, using stubs.\n` : ""}
+**QA:** ${qa}
+${this.qaNotes.length > 0 ? `\n${this.qaNotes.map((n) => `- ${n}`).join("\n")}\n` : ""}
 **Spend:** $${this.board.project!.spentUsd.toFixed(2)} of $${this.board.project!.budgetUsd.toFixed(2)}
 
 **Repo:** \`${this.repo!.dir}\`
@@ -665,7 +791,7 @@ ${(t.failures ?? []).map((f, i) => `${i + 1}. ${f}`).join("\n")}
     this.board.addSpend(agentId, res.costUsd, ticketId);
     this.checkBudget();
     if (!opts.keepStatus && task.kind !== "build") {
-      const finished = { prd: "Handed in the PRD", architecture: "Handed in the architecture", tickets: "Filed the tickets", review: "", build: "" }[task.kind];
+      const finished = { prd: "Handed in the PRD", architecture: "Handed in the architecture", tickets: "Filed the tickets", review: "", build: "", qa: "" }[task.kind];
       this.board.updateAgent(agentId, {
         status: prevStatus === "working" ? "working" : "idle",
         ...(res.ok && finished ? { activity: finished } : {}),

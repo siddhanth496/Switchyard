@@ -47,6 +47,8 @@ export interface Ticket {
   failures?: string[];
   /** True when the next attempt goes to the tech lead. */
   escalated?: boolean;
+  /** "bug" for tickets QA filed. */
+  kind?: "feature" | "bug";
   costUsd: number;
   createdAt: number;
   updatedAt: number;
@@ -112,6 +114,7 @@ export type ProjectPhase =
   | "architecture" // tech lead defining areas
   | "ticketing" // task creator breaking down work
   | "building" // dispatcher + engineers running
+  | "testing" // QA testing the merged build
   | "paused" // waiting on a spend gate
   | "releasing" // waiting on the release gate
   | "shipped"

@@ -775,3 +775,14 @@ h3 {
   display: flex;
   gap: 6px;
 }
+
+/* ---- QA ---------------------------------------------------------------- */
+
+.ticket .bug-tag {
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: var(--fail-soft);
+  color: var(--fail);
+  font-weight: 600;
+}

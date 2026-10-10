@@ -1,11 +1,11 @@
 # Agent Company
 
-An AI software company that builds a product from scratch. You are the CEO. A PM, tech lead, task creator, engineers and a CFO work as agents, in parallel, coordinated through a job board.
+An AI software company that builds a product from scratch. You are the CEO. A PM, tech lead, task creator, engineers, QA and a CFO work as agents, in parallel, coordinated through a job board.
 
 ```
 idea → PRD (you approve) → architecture + ownership areas (you approve)
      → tagged tickets → parallel build in git worktrees → review → merge
-     → release (you approve)
+     → QA tests the build, files bugs as tickets, re-tests → release (you approve)
 ```
 
 ## Quick start
@@ -62,6 +62,7 @@ This is the core of the design.
 - **File leases** are held from start until merge. If an engineer touches files another ticket holds, the attempt is discarded and sent back.
 - **Owner notes** (`docs/owners/<area>.md` in the product repo) carry context across sessions. Engineers read them before each ticket; after a merge, the engineer's notes are recorded under the area lead's name, so the lead is the single writer.
 - **Failures don't block the build.** A rejected review, failed build or merge conflict sends the ticket back with feedback. The owner gets the first two attempts; the third is **escalated to the tech lead** with the full failure history (and, with Claude agents, the next model up: Haiku → Sonnet → Opus). If that fails too, a decision card asks you to **retry with guidance** or **skip** the ticket. Independent tickets keep building while you decide. Skipped tickets count as resolved: dependents start, told to stub around the missing work, and the release notes list what was skipped. In unattended runs (`--auto`), failed tickets are skipped rather than retried, so a broken ticket can't burn the budget.
+- **QA** tests the merged build against the PRD in a throwaway worktree once the board is clear: it installs, runs tests and walks through the main flows, but never fixes code. Each bug becomes a ticket (tagged *Bug*) in the right area and goes through the normal flow ahead of other work, then QA re-tests. After 2 rounds (`qaRounds`), anything still broken is listed as a known issue on the release card instead of looping. Set `qaRounds: 0` to turn QA off.
 - **CFO** tracks spend per ticket and agent. At the budget, dispatch pauses until you approve more.
 
 ## Layout

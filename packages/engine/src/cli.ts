@@ -51,7 +51,7 @@ async function main() {
   }
   const budget = Number(values.budget ?? 20);
   const runner: AgentRunner = demo
-    ? new MockRunner({ stepMs: 40, rejectFirstReviewOf: ["Notes CRUD API"] })
+    ? new MockRunner({ stepMs: 40, rejectFirstReviewOf: ["Notes CRUD API"], qaFindsBugOnce: true })
     : new ClaudeRunner({ model: values.model, apiKey, maxBudgetUsdPerTask: Math.max(0.5, budget / 4) });
 
   const orch = new Orchestrator(runner, {

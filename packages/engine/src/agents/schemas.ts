@@ -42,6 +42,25 @@ export const BuildReportSchema = z.object({
 });
 export type BuildReport = z.infer<typeof BuildReportSchema>;
 
+/** What QA returns after testing the merged build. */
+export const QaReportSchema = z.object({
+  verdict: z.enum(["pass", "bugs"]),
+  summary: z.string().default(""),
+  bugs: z
+    .array(
+      z.object({
+        title: z.string().min(1),
+        description: z.string().default(""),
+        steps: z.array(z.string()).default([]),
+        expected: z.string().default(""),
+        files: z.array(z.string()).default([]),
+        severity: z.enum(["high", "medium", "low"]).default("medium"),
+      }),
+    )
+    .default([]),
+});
+export type QaReport = z.infer<typeof QaReportSchema>;
+
 export const ReviewSchema = z.object({
   verdict: z.enum(["approve", "changes"]),
   feedback: z.string().default(""),

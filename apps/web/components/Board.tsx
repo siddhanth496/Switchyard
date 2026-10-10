@@ -40,10 +40,13 @@ function TicketCard({
   return (
     <article className={`ticket s-${ticket.status}`}>
       <div className="top">
-        <span className="id">{ticket.id}</span>
+        <span className="id">
+          {ticket.id}
+          {ticket.kind === "bug" && <span className="bug-tag">Bug</span>}
+        </span>
         <span>{area?.name ?? ticket.area}</span>
       </div>
-      <div className="title">{ticket.title}</div>
+      <div className="title">{ticket.kind === "bug" ? ticket.title.replace(/^Bug: /, "") : ticket.title}</div>
       <ul className="files" aria-label="Files">
         {ticket.files.slice(0, 4).map((f) => (
           <li key={f}>{f}</li>

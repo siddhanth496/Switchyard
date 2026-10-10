@@ -8,6 +8,7 @@ const PHASES: { label: string; phases: ProjectPhase[] }[] = [
   { label: "Architecture", phases: ["architecture"] },
   { label: "Tickets", phases: ["ticketing"] },
   { label: "Build", phases: ["building", "paused"] },
+  { label: "QA", phases: ["testing"] },
   { label: "Release", phases: ["releasing", "shipped"] },
 ];
 

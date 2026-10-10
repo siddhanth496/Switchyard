@@ -44,15 +44,21 @@ async function main() {
     process.exit(1);
   }
 
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!demo && !apiKey) {
+    console.error("Set ANTHROPIC_API_KEY first: export ANTHROPIC_API_KEY=sk-ant-api...");
+    process.exit(1);
+  }
+  const budget = Number(values.budget ?? 20);
   const runner: AgentRunner = demo
     ? new MockRunner({ stepMs: 40, rejectFirstReviewOf: ["Notes CRUD API"] })
-    : new ClaudeRunner({ model: values.model });
+    : new ClaudeRunner({ model: values.model, apiKey, maxBudgetUsdPerTask: Math.max(0.5, budget / 4) });
 
   const orch = new Orchestrator(runner, {
     workspaceDir: values.workspace!,
     engineersPerArea: Number(values.engineers ?? 1),
     floaters: Number(values.floaters ?? 1),
-    budgetUsd: Number(values.budget ?? 20),
+    budgetUsd: budget,
     autoApprove: demo || values.auto ? "all" : [],
     tickMs: demo ? 50 : 500,
   });

@@ -21,7 +21,7 @@ export default function Home() {
     return (
       <main className="start">
         <h1>Can't reach the server</h1>
-        <p className="lede">Start it with <code>pnpm server</code>, then reload this page.</p>
+        <p className="lede">Start it with <code>pnpm api</code>, then reload this page.</p>
       </main>
     );
   }

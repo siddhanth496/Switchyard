@@ -13,7 +13,7 @@
     "test": "pnpm --filter @agentco/engine test",
     "typecheck": "pnpm -r typecheck",
     "demo": "pnpm --filter @agentco/engine demo",
-    "server": "pnpm --filter @agentco/server dev",
+    "api": "pnpm --filter @agentco/server dev",
     "web": "pnpm --filter @agentco/web dev",
     "dev": "pnpm --parallel --filter @agentco/server --filter @agentco/web dev"
   }

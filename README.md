@@ -21,7 +21,7 @@ pnpm demo          # scripted end-to-end run in the terminal, no API key
 Run the dashboard (two processes):
 
 ```bash
-pnpm server        # API + live events on http://localhost:4000
+pnpm api           # API + live events on http://localhost:4000
 pnpm web           # UI on http://localhost:3000
 ```
 
@@ -33,7 +33,7 @@ Claude agents run through the [Claude Agent SDK](https://docs.claude.com/en/docs
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
-RUNNER=claude pnpm server        # makes Claude the default in the UI
+RUNNER=claude pnpm api           # makes Claude the default in the UI
 # or from the terminal, with gates prompted in the shell:
 pnpm --filter @agentco/engine agentco run "a habit tracker for small teams"
 ```

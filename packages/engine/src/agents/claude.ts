@@ -6,6 +6,8 @@ export interface ClaudeRunnerOptions {
   model?: string;
   /** Per-task spend cap in USD. */
   maxBudgetUsdPerTask?: number;
+  /** Anthropic API key. Falls back to ANTHROPIC_API_KEY in the environment. */
+  apiKey?: string;
 }
 
 const READ_TOOLS = ["Read", "Glob", "Grep"];
@@ -44,6 +46,7 @@ export class ClaudeRunner implements AgentRunner {
           permissionMode: "dontAsk",
           settingSources: [],
           abortController,
+          ...(this.options.apiKey ? { env: envWithApiKey(this.options.apiKey) } : {}),
         },
       });
 
@@ -72,6 +75,31 @@ export class ClaudeRunner implements AgentRunner {
       return { ok: false, text, costUsd, error: err instanceof Error ? err.message : String(err) };
     }
   }
+}
+
+/**
+ * Settings that would make the agent authenticate some other way (an OAuth
+ * login, a cloud provider, a host-managed proxy). With an API key given,
+ * they are removed so every request is billed to that key.
+ */
+const OTHER_AUTH_VARS = [
+  "ANTHROPIC_AUTH_TOKEN",
+  "ANTHROPIC_BASE_URL",
+  "CLAUDE_CODE_OAUTH_TOKEN",
+  "CLAUDE_CODE_USE_BEDROCK",
+  "CLAUDE_CODE_USE_VERTEX",
+  "CLAUDE_CODE_USE_FOUNDRY",
+  "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST",
+];
+
+/** `env` replaces the subprocess environment, so start from ours. */
+export function envWithApiKey(apiKey: string, base: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(base)) {
+    if (v !== undefined && !OTHER_AUTH_VARS.includes(k)) env[k] = v;
+  }
+  env.ANTHROPIC_API_KEY = apiKey;
+  return env;
 }
 
 function firstLine(s: string): string {

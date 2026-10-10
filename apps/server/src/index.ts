@@ -24,6 +24,32 @@ const board = new Board();
 let orch: Orchestrator | null = null;
 let runnerName: string = DEFAULT_RUNNER;
 
+/** Models offered in the UI, cheapest first. */
+const MODELS = [
+  { id: "claude-haiku-5-5", label: "Haiku 5.5", hint: "Cheapest. Good for testing the flow." },
+  { id: "claude-sonnet-5-5", label: "Sonnet 5.5", hint: "Balanced cost and quality." },
+  { id: "claude-opus-5-5", label: "Opus 5.5", hint: "Most capable. Costs the most." },
+] as const;
+const DEFAULT_MODEL = process.env.MODEL ?? "claude-haiku-5-5";
+
+/**
+ * The API key lives only in this process's memory: never written to disk,
+ * never logged, never returned to the browser beyond its last 4 characters.
+ * A key from the environment is used unless the UI sets one.
+ */
+let uiKey: string | undefined;
+const envKey = process.env.ANTHROPIC_API_KEY || undefined;
+const currentKey = () => uiKey ?? envKey;
+
+function keyStatus() {
+  const key = currentKey();
+  return {
+    hasKey: !!key,
+    keySource: uiKey ? "ui" : envKey ? "env" : null,
+    keyHint: key ? key.slice(-4) : null,
+  };
+}
+
 const StartSchema = z.object({
   idea: z.string().min(3),
   name: z.string().optional(),
@@ -31,21 +57,46 @@ const StartSchema = z.object({
   model: z.string().optional(),
   engineersPerArea: z.number().int().min(1).max(6).optional(),
   floaters: z.number().int().min(0).max(6).optional(),
-  budgetUsd: z.number().positive().optional(),
+  budgetUsd: z.number().positive().max(1000).optional(),
 });
 
-function makeRunner(kind: "mock" | "claude", model?: string): AgentRunner {
-  return kind === "claude"
-    ? new ClaudeRunner({ model })
-    : new MockRunner({ stepMs: 400, rejectFirstReviewOf: ["Notes CRUD API"] });
+function makeRunner(kind: "mock" | "claude", model: string, budgetUsd: number): AgentRunner {
+  if (kind === "mock") return new MockRunner({ stepMs: 400, rejectFirstReviewOf: ["Notes CRUD API"] });
+  // Cap any single task at a quarter of the budget (min $0.50), so one
+  // runaway agent can't blow through it before the CFO gate trips.
+  return new ClaudeRunner({
+    model,
+    apiKey: currentKey(),
+    maxBudgetUsdPerTask: Math.max(0.5, budgetUsd / 4),
+  });
 }
 
 const app = new Hono();
-app.use("/api/*", cors({ origin: WEB_ORIGIN }));
+app.use("/api/*", cors({ origin: WEB_ORIGIN, allowMethods: ["GET", "POST", "PUT", "DELETE"] }));
 
-app.onError((err, c) => c.json({ error: err.message }, 400));
+app.onError((err, c) => {
+  const message = err instanceof z.ZodError ? (err.issues[0]?.message ?? "Invalid request") : err.message;
+  return c.json({ error: message }, 400);
+});
 
 app.get("/api/health", (c) => c.json({ ok: true }));
+
+app.get("/api/config", (c) =>
+  c.json({ ...keyStatus(), models: MODELS, defaultModel: DEFAULT_MODEL, defaultRunner: DEFAULT_RUNNER }),
+);
+
+app.put("/api/config/key", async (c) => {
+  const { key } = z
+    .object({ key: z.string().trim().regex(/^sk-ant-[A-Za-z0-9_-]{20,}$/, "That doesn't look like an Anthropic API key (sk-ant-...).") })
+    .parse(await c.req.json());
+  uiKey = key;
+  return c.json(keyStatus());
+});
+
+app.delete("/api/config/key", (c) => {
+  uiKey = undefined;
+  return c.json(keyStatus());
+});
 
 app.get("/api/state", (c) =>
   c.json({ ...board.snapshot(), running: orch?.isRunning ?? false, runner: runnerName }),
@@ -89,14 +140,23 @@ app.get("/api/events", (c) =>
 app.post("/api/projects", async (c) => {
   const body = StartSchema.parse(await c.req.json());
   if (orch?.isRunning) return c.json({ error: "A project is already running. Stop it first." }, 409);
-  runnerName = body.runner ?? DEFAULT_RUNNER;
+  const kind = body.runner ?? DEFAULT_RUNNER;
+  if (kind === "claude" && !currentKey()) {
+    return c.json({ error: "Add your Anthropic API key to use Claude agents." }, 400);
+  }
+  const model = body.model ?? DEFAULT_MODEL;
+  if (kind === "claude" && !MODELS.some((m) => m.id === model)) {
+    return c.json({ error: `Unknown model "${model}".` }, 400);
+  }
+  const budgetUsd = body.budgetUsd ?? 20;
+  runnerName = kind === "claude" ? `claude (${model})` : "mock";
   orch = new Orchestrator(
-    makeRunner(runnerName as "mock" | "claude", body.model),
+    makeRunner(kind, model, budgetUsd),
     {
       workspaceDir: WORKSPACE,
       engineersPerArea: body.engineersPerArea ?? 1,
       floaters: body.floaters ?? 1,
-      budgetUsd: body.budgetUsd ?? 20,
+      budgetUsd,
     },
     board,
   );
@@ -129,5 +189,6 @@ app.post("/api/stop", (c) => {
 serve({ fetch: app.fetch, port: PORT }, () => {
   console.log(`Agent Company server on http://localhost:${PORT}`);
   console.log(`  runner: ${DEFAULT_RUNNER} (set RUNNER=claude for real agents)`);
+  console.log(`  API key: ${envKey ? "from ANTHROPIC_API_KEY" : "not set (add it in the UI)"}`);
   console.log(`  workspace: ${WORKSPACE}`);
 });

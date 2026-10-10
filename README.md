@@ -29,13 +29,21 @@ Pick **Demo agents** in the UI to watch the flow for free, or **Claude agents** 
 
 ### Using real Claude agents
 
-Claude agents run through the [Claude Agent SDK](https://docs.claude.com/en/docs/agent-sdk/overview) and need an Anthropic API key:
+Claude agents run through the [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview) and are billed to an Anthropic API key from [console.anthropic.com](https://console.anthropic.com).
+
+On the start screen, choose **Claude agents**, paste your API key, pick a model and set a budget:
+
+- **API key**: held only in the server's memory, never written to disk or logged, and cleared when the server stops. The UI only ever shows its last 4 characters. You can also set `ANTHROPIC_API_KEY` before `pnpm api` instead.
+- **Model**: Haiku 5.5 (cheapest, good for testing), Sonnet 5.5 or Opus 5.5.
+- **Budget**: work pauses at the budget until you approve more, and no single agent task can spend more than a quarter of it.
+
+When a key is set, agents always authenticate with it. Other credential settings in the environment (OAuth tokens, cloud providers) are ignored, so a Claude subscription login on the same machine is never used.
+
+From the terminal, with gates prompted in the shell:
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...
-RUNNER=claude pnpm api           # makes Claude the default in the UI
-# or from the terminal, with gates prompted in the shell:
-pnpm --filter @agentco/engine agentco run "a habit tracker for small teams"
+export ANTHROPIC_API_KEY=sk-ant-api...
+pnpm --filter @agentco/engine agentco run "a habit tracker for small teams" --model claude-haiku-5-5 --budget 3
 ```
 
 Engineers can edit files and run shell commands inside their worktrees. **Run the server in a container or VM** when using real agents.
@@ -76,6 +84,9 @@ workspace/             generated product repos (gitignored)
 | --- | --- | --- |
 | GET | `/api/state` | |
 | GET | `/api/events` | SSE: `snapshot`, then `board` events |
+| GET | `/api/config` | key status (last 4 only), models |
+| PUT | `/api/config/key` | `{ key }` |
+| DELETE | `/api/config/key` | |
 | POST | `/api/projects` | `{ idea, runner?, engineersPerArea?, floaters?, budgetUsd?, model? }` |
 | POST | `/api/gates/:id/approve` | `{ feedback? }` |
 | POST | `/api/gates/:id/reject` | `{ feedback }` |

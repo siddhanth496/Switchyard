@@ -1,15 +1,17 @@
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
 
-async function post<T>(path: string, body: unknown = {}): Promise<T> {
+async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`${API_URL}${path}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
+    method,
+    headers: body === undefined ? undefined : { "content-type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
   });
   const data = (await res.json().catch(() => ({}))) as T & { error?: string };
   if (!res.ok) throw new Error(data.error ?? `Request failed (${res.status})`);
   return data;
 }
+
+const post = <T>(path: string, body: unknown = {}) => request<T>("POST", path, body);
 
 export interface StartOptions {
   idea: string;
@@ -20,7 +22,28 @@ export interface StartOptions {
   model?: string;
 }
 
+export interface ModelOption {
+  id: string;
+  label: string;
+  hint: string;
+}
+
+export interface KeyStatus {
+  hasKey: boolean;
+  keySource: "ui" | "env" | null;
+  keyHint: string | null;
+}
+
+export interface ServerConfig extends KeyStatus {
+  models: ModelOption[];
+  defaultModel: string;
+  defaultRunner: "mock" | "claude";
+}
+
 export const api = {
+  config: () => request<ServerConfig>("GET", "/api/config"),
+  setKey: (key: string) => request<KeyStatus>("PUT", "/api/config/key", { key }),
+  clearKey: () => request<KeyStatus>("DELETE", "/api/config/key"),
   start: (opts: StartOptions) => post("/api/projects", opts),
   approve: (gateId: string) => post(`/api/gates/${gateId}/approve`),
   reject: (gateId: string, feedback: string) => post(`/api/gates/${gateId}/reject`, { feedback }),

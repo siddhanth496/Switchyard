@@ -5,6 +5,18 @@ import type { Area } from "./types.js";
  * prefix and covers everything under it. "src/auth/**" is accepted and
  * treated as "src/auth/".
  */
+/**
+ * Files only their owning team changes: marketing's brand, the designer's
+ * design and release screenshots, the PM's PRD and the tech lead's areas.
+ * Engineers read them; a ticket that changes them is sent back.
+ */
+export const PROTECTED_PATHS = ["docs/brand/", "docs/design/", "docs/screens/", "docs/PRD.md", "docs/areas.json"];
+
+export function isProtected(path: string): boolean {
+  const p = normalizePath(path);
+  return PROTECTED_PATHS.some((x) => (x.endsWith("/") ? p.startsWith(x) || `${p}/` === x : p === x));
+}
+
 export function normalizePath(p: string): string {
   let s = p.trim().replace(/\\/g, "/").replace(/^\.\//, "").replace(/^\/+/, "");
   if (s.endsWith("/**")) s = s.slice(0, -2);

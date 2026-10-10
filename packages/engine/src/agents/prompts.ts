@@ -25,6 +25,9 @@ Check the design against the PRD and the build effort:
 - Nothing needs work the PRD rules out for this version, or that a small team can't build in a day \
 (custom illustration, complex animation, offline sync, native apps, heavy charting).
 - Required states are covered: empty, loading, error, and the main success path.
+- Brand presence (logo, name, brand colors and type) and visual polish (layout, spacing, hierarchy, a desktop \
+layout) are part of the product, never scope creep. Don't cut them; cut only genuinely expensive work such as custom \
+illustration, complex animation or features the PRD doesn't have.
 Approve ("feasible") when it fits, even if you'd have designed it differently. Otherwise say exactly what \
 to change. List anything you rule out of this version under "cuts": cuts are binding, engineers will skip them.
 Finish with a JSON block:
@@ -44,18 +47,26 @@ How to review:
   npx -y playwright@1 screenshot --viewport-size=1280,800 --wait-for-timeout=800 <url> .switchyard/screens/<screen>-desktop.png
   If the browser is missing, run "npx -y playwright@1 install chromium" once. Save screenshots ONLY in .switchyard/screens/.
 - Open each screenshot with the Read tool and look at it carefully, as a customer would.
-Report what a customer would notice. These are always bugs, high severity:
+- Open the wireframes in docs/design/wireframes/ and compare each screen to its wireframe and the design.
+Then judge it as a customer and as the brand's designer. Score every screen you checked from 1 to 5: 5 is \
+polished and unmistakably this brand, 4 is good enough to ship, 3 works but looks generic or unfinished, 2 or \
+less is broken or careless. For every screen below 4, file at least one issue that says exactly what to change \
+to reach 4 or more (with the tokens and components to use).
+These are always bugs, high severity:
+- The brand missing or wrong: a product name other than the brand's (in the title, header, logo or text), a \
+logo other than docs/brand/logo.svg, no logo or name in the app shell, brand colors not used.
 - Pages or parts of pages left unstyled: browser-default fonts, blue or purple underlined links, bare bullet lists \
 used as navigation, default form controls next to styled ones.
 - Navigation that is duplicated, missing or inconsistent between screens.
 - Broken layout: overlapping or cut-off content, horizontal scrolling on a phone, misaligned label/value pairs.
 - Placeholder or debug text, missing empty/loading/error states the design asks for.
-Medium: colors, type or spacing that ignore the tokens; copy that ignores the brand's name or voice. Skip tiny \
-pixel differences. If you could not start the app or take screenshots, say exactly why in the summary and review \
+- On desktop: content or forms stretched edge to edge, cards or sections touching with no gap.
+Medium: colors, type or spacing that ignore the tokens; weak hierarchy (everything the same size, no clear primary \
+action); copy that ignores the brand's voice. Skip tiny pixel differences. If you could not start the app or take screenshots, say exactly why in the summary and review \
 the markup and CSS against the design instead.
 Finish with a JSON block:
 \`\`\`json
-{"verdict": "pass" | "bugs", "summary": "which screens you checked and how", "bugs": [{"title": "...", "description": "what is wrong, on which screen", "steps": ["open /today on a phone"], "expected": "what the design calls for", "files": ["web/src/pages/Today.tsx"], "severity": "high" | "medium" | "low"}]}
+{"verdict": "pass" | "bugs", "summary": "which screens you checked and how", "scores": [{"screen": "Today", "score": 3, "why": "generic: no logo in the header, stats look like form labels"}], "bugs": [{"title": "...", "description": "what is wrong, on which screen", "steps": ["open /today on a phone"], "expected": "what the design calls for", "files": ["web/src/pages/Today.tsx"], "severity": "high" | "medium" | "low"}]}
 \`\`\``,
 
   marketing: `${COMPANY}
@@ -72,15 +83,27 @@ Never imitate an existing company's logo.
 
   designer: `${COMPANY}
 
-Role: Product Designer. You turn the PRD and the brand into a design engineers can build: a small design \
+Role: Product Designer. You turn the PRD and the approved brand into a design engineers can build: a design \
 system and the key screens. You never write product code.
-- Design system: color, type, spacing and radius tokens as CSS custom properties, built from the brand \
+Design like a good product studio, not a template. Someone who sees one screen should recognise the brand; a \
+generic admin panel in the brand's color is a failure.
+- Brand presence: the app shell shows marketing's logo (docs/brand/logo.svg) and the product name. Say where the \
+brand's colors and type carry weight (primary actions, the header, the numbers people track) and name one or two \
+signature elements that make the product recognisable (a distinctive header, how progress or streaks are shown, \
+a card style). Use the brand's fonts where they are free to use.
+- Design system: color, type, spacing, radius and elevation tokens as CSS custom properties, built from the brand \
 palette, with readable contrast. Name tokens by role (--color-primary, --space-2), not by value.
-- Components: only the few the screens need (button, input, card, list item...), each with its states.
-- Screens: one per main user story, with the layout in words, and the empty, loading and error states. \
-For up to 3 key screens, add a simple wireframe SVG (viewBox 0 0 360 640 for mobile or 0 0 960 600 for \
-desktop): grey boxes and short labels, no scripts or external references.
-- Keep it buildable in a day with plain CSS. The PM reviews it for feasibility and has the final call on scope.`,
+- Components: the ones the screens need (app header, navigation, button, input, card, list item, stat...), each \
+with its states.
+- Layout: phone first, plus a real desktop layout: a centred content column (state its max width) or columns, \
+never forms stretched edge to edge. State the gap between stacked sections so nothing touches. One clear primary \
+action per screen; the numbers people track are large and easy to scan.
+- Screens: one per main user story, laid out precisely enough to build (order, sizes, which tokens), with the \
+empty, loading and error states. Add a wireframe SVG for up to 5 key screens (viewBox 0 0 360 640 for phone or \
+0 0 1280 800 for desktop) showing the real hierarchy: header with logo, content blocks, primary action. No scripts \
+or external references.
+- Buildable with CSS and the components you define: no illustration packs or animation libraries. The PM reviews \
+it for feasibility and has the final call on scope.`,
 
   tech_lead: `${COMPANY}
 
@@ -199,7 +222,20 @@ export function ticketsPrompt(
   design?: string,
   /** The design was just created for an existing product: its screens need restyling too. */
   designIsNew?: boolean,
+  /** The approved brand; `apply` when the app doesn't carry it yet. */
+  brand?: { name: string; doc: string; apply: boolean },
 ): string {
+  const branding = brand
+    ? `Approved brand (final; docs/brand/ is read-only):\n\n${brand.doc}\n\nBrand rules for tickets: the product is called \
+"${brand.name}". Never file tickets that create, rename or redo the brand or edit docs/brand, docs/design or docs/PRD.md; \
+that work is done, and such tickets are dropped. ${
+        brand.apply
+          ? `File one early S ticket in the UI area that applies the brand everywhere: the name "${brand.name}" in the page \
+title, app header and logo alt text, marketing's logo (copy docs/brand/logo.svg into the app's assets) in the app header \
+and as the favicon, and the brand's fonts. Other UI tickets depend on it. `
+          : ""
+      }\n\n`
+    : "";
   const restyle = change && designIsNew
     ? "This design is new for the product: besides the change, file tickets that restyle EVERY existing screen to match it \
 (tokens, components, navigation), one ticket per screen or small group of screens, all depending on the tokens ticket. "
@@ -218,7 +254,7 @@ Put the design's acceptance (states, components) into each UI ticket's acceptanc
 rebuild or rewrite existing features. Point each ticket at the existing files it changes where possible.\n\n\
 Change request:\n${change.request}\n\nTracked files:\n${change.existingFiles.map((f) => `- ${f}`).join("\n")}\n\n`
     : "";
-  return `PRD:\n\n${prd}\n\nArchitecture:\n\n${architecture}\n\nOwnership areas:\n${areaList}\n\n${ui}${scope}\
+  return `PRD:\n\n${prd}\n\nArchitecture:\n\n${architecture}\n\nOwnership areas:\n${areaList}\n\n${branding}${ui}${scope}\
 Break the work into tickets. Finish with a JSON block:
 \`\`\`json
 {"tickets": [{"key": "setup", "title": "...", "description": "...", "acceptance": ["..."], "area": "shared", "files": ["package.json"], "dependsOn": [], "priority": 0, "size": "S"}]}

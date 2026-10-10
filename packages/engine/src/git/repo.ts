@@ -157,6 +157,20 @@ export class ProjectRepo {
     return stdout.split("\n").filter(Boolean).slice(0, limit);
   }
 
+  /** Earlier committed versions of a file on main, newest first. */
+  async versions(path: string, limit = 20): Promise<string[]> {
+    const { stdout } = await this.git(["log", "--format=%H", `-${limit}`, "--", path]);
+    const out: string[] = [];
+    for (const hash of stdout.split("\n").filter(Boolean)) {
+      try {
+        out.push((await this.git(["show", `${hash}:${path}`])).stdout);
+      } catch {
+        /* deleted in that commit */
+      }
+    }
+    return out;
+  }
+
   async log(n = 20): Promise<string[]> {
     const { stdout } = await this.git(["log", "--oneline", `-${n}`]);
     return stdout.split("\n").filter(Boolean);

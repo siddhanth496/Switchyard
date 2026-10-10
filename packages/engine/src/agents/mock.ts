@@ -138,8 +138,13 @@ export class MockRunner implements AgentRunner {
                 },
               ]
             : [];
+        const rough = this.designFindsIssueOnce && round === 1;
         const report = {
           verdict: bugs.length ? "bugs" : "pass",
+          scores: [
+            { screen: "Sign in", score: 4, why: "" },
+            { screen: "Notes list", score: rough ? 2 : 4, why: rough ? "nav is unstyled default links" : "" },
+          ],
           summary: this.noScreenshots
             ? "Couldn't start a browser to take screenshots; reviewed the markup and CSS against the design instead."
             : `Round ${round}: screenshotted sign-in and the notes list at phone size.`,

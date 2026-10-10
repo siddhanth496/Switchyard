@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -505,6 +505,8 @@ describe("marketing and design", () => {
 
     const release = orch.board.gates.find((g) => g.kind === "release")!;
     expect(release.content).toContain("**Design review:** passed, after fixing 1 issue(s)");
+    expect(release.content).toContain("Notes list 2/5 (nav is unstyled default links)");
+    expect(release.content).toContain("Scores: Sign in 4/5, Notes list 4/5");
     expect(release.images?.map((i) => i.title)).toEqual(["notes-list-phone", "sign-in-phone"]);
     expect(release.images?.[0]?.svg).toMatch(/^<svg/);
     expect(readFileSync(join(project.dir, "docs/screens/notes-list-phone.svg"), "utf8")).toMatch(/^<svg/);
@@ -567,6 +569,67 @@ describe("marketing and design", () => {
     // The PM judges the design knowing the brand is settled.
     expect(tasks.find((t) => t.kind === "feasibility")!.prompt).toContain("Approved brand (final");
   }, 30_000);
+
+  it("keeps engineers and tickets off the brand, and puts the brand in the PRD and the tickets", async () => {
+    const tasks: AgentTask[] = [];
+    const mock = new MockRunner({ stepMs: 0 });
+    const runner: AgentRunner = {
+      name: "spy",
+      run: async (t, on, sig) => {
+        tasks.push(t);
+        if (t.kind === "tickets" && !t.context.changeRequest) {
+          const res = await mock.run(t, on, sig);
+          const plan = JSON.parse(res.text.replace(/^```json\n|\n```$/g, ""));
+          plan.tickets.push(
+            { key: "kit", title: "Write the brand kit", area: "shared", files: ["docs/brand/brand.json", "docs/brand/BRAND.md"], dependsOn: [], priority: 0, size: "S" },
+            { key: "readme", title: "README and brand notes", area: "shared", files: ["package.json", "docs/design/DESIGN.md"], dependsOn: ["kit"], priority: 2, size: "S" },
+          );
+          return { ...res, text: `\`\`\`json\n${JSON.stringify(plan)}\n\`\`\`` };
+        }
+        // The app shell engineer also "tidies up" the brand file.
+        if (t.kind === "build" && t.context.ticket?.title === "App shell and styles" && t.context.ticket.attempts === 0) {
+          writeFileSync(join(t.cwd, "docs/brand/brand.json"), '{"name": "Habit Tracker"}\n');
+        }
+        return mock.run(t, on, sig);
+      },
+    };
+    const orch = new Orchestrator(runner, { workspaceDir: workspace(), autoApprove: "all", tickMs: 5, qaRounds: 0 });
+    const project = await orch.run("A notes app");
+    expect(project.phase).toBe("shipped");
+
+    const titles = orch.board.tickets.map((t) => t.title);
+    expect(titles).not.toContain("Write the brand kit");
+    expect(orch.board.tickets.find((t) => t.title === "README and brand notes")!.files).toEqual(["package.json"]);
+    const shell = orch.board.tickets.find((t) => t.title === "App shell and styles")!;
+    expect(shell.failures?.[0]).toContain("read-only for engineers");
+    expect(JSON.parse(readFileSync(join(project.dir, "docs/brand/brand.json"), "utf8")).name).toBe("Jotter");
+
+    expect(readFileSync(join(project.dir, "docs/PRD.md"), "utf8")).toMatch(/^> \*\*Product name: Jotter\.\*\*/);
+    const plan = tasks.find((t) => t.kind === "tickets")!.prompt;
+    expect(plan).toContain('the product is called "Jotter"');
+    expect(plan).toContain("applies the brand everywhere");
+    expect(tasks.find((t) => t.kind === "build")!.prompt).toContain("Product name: Jotter.");
+  }, 30_000);
+
+  it("restores the approved brand when something overwrote it", async () => {
+    const ws = workspace();
+    const plain = { workspaceDir: ws, autoApprove: "all" as const, tickMs: 5, qaRounds: 0 };
+    const v1 = await new Orchestrator(new MockRunner({ stepMs: 0 }), plain).run("A notes app");
+    writeFileSync(join(v1.dir, "docs/brand/brand.json"), '{"name": "Habit Tracker", "productNameStatus": "placeholder"}\n');
+    git(v1.dir, "commit", "-qam", "T-3: Write brand kit");
+
+    const tasks: AgentTask[] = [];
+    const mock = new MockRunner({ stepMs: 0 });
+    const runner: AgentRunner = { name: "spy", run: (t, on, sig) => (tasks.push(t), mock.run(t, on, sig)) };
+    const second = new Orchestrator(runner, plain);
+    const v2 = await second.run("Add tags to notes", undefined, { existingDir: v1.dir });
+    expect(v2.brand?.name).toBe("Jotter");
+    expect(second.board.gates.some((g) => g.kind === "brand")).toBe(false);
+    expect(second.board.snapshot().log.some((l) => l.message.startsWith("Restored the approved brand Jotter"))).toBe(true);
+    expect(JSON.parse(readFileSync(join(v1.dir, "docs/brand/brand.json"), "utf8")).tagline).toBe("Write it down. Find it fast.");
+    // The app is told to carry the restored brand again.
+    expect(tasks.find((t) => t.kind === "tickets")!.prompt).toContain("applies the brand everywhere");
+  }, 40_000);
 
   it("can run without marketing and design", async () => {
     const orch = new Orchestrator(new MockRunner({ stepMs: 0 }), {

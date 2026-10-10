@@ -72,6 +72,21 @@ export const QaReportSchema = z.object({
 });
 export type QaReport = z.infer<typeof QaReportSchema>;
 
+/** The designer's review of the running app: QA-style issues plus a 1-5 score per screen. */
+export const DesignReviewSchema = QaReportSchema.extend({
+  scores: z
+    .array(
+      z.object({
+        screen: z.string().min(1),
+        score: z.coerce.number().min(1).max(5).catch(3),
+        why: lenient(z.string().default("")),
+      }),
+    )
+    .nullish()
+    .transform((v) => v ?? []),
+});
+export type DesignReview = z.infer<typeof DesignReviewSchema>;
+
 const HEX = z.string().regex(/^#[0-9a-fA-F]{3,8}$/, "colors are hex, like #3346d3");
 
 /** What marketing returns: the name, the logo and how the product talks. */

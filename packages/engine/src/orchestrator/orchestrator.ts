@@ -2,7 +2,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { basename, extname, join, resolve } from "node:path";
 import { Board } from "../core/board.js";
 import { planDispatch, type Assignment } from "../core/dispatcher.js";
-import { anyOverlap, overlaps, resolveArea } from "../core/paths.js";
+import { anyOverlap, isProtected, overlaps, resolveArea } from "../core/paths.js";
 import type { Agent, Area, Gate, GateImage, GateKind, Project, Scorecard, Ticket, TicketSize } from "../core/types.js";
 import {
   BENCH_MERGES,
@@ -36,6 +36,7 @@ import {
   ArchitectureSchema,
   BrandSchema,
   BuildReportSchema,
+  DesignReviewSchema,
   DesignSchema,
   FeasibilitySchema,
   LaunchSchema,
@@ -45,6 +46,7 @@ import {
   parseWith,
   type Architecture,
   type BrandPlan,
+  type DesignReview,
   type Feasibility,
   type QaReport,
 } from "../agents/schemas.js";
@@ -144,6 +146,8 @@ export class Orchestrator {
   private designDoc = "";
   /** An existing product got its first design this run: its screens need restyling. */
   private designIsNew = false;
+  /** The brand was created or restored this run, so it still has to be applied to the app. */
+  private brandIsNew = false;
   private launchWritten = false;
 
   constructor(
@@ -283,6 +287,7 @@ export class Orchestrator {
     this.brandDoc = "";
     this.designDoc = "";
     this.designIsNew = false;
+    this.brandIsNew = false;
     this.launchWritten = false;
     this.board.addAgent({
       id: IDS.cfo,
@@ -382,6 +387,7 @@ export class Orchestrator {
           existingFiles ? { request: idea, existingFiles } : undefined,
           this.designDoc || undefined,
           this.designIsNew,
+          this.brandForTickets(this.brandIsNew || this.designIsNew),
         ),
         cwd: repo.dir,
         canWrite: false,
@@ -446,9 +452,22 @@ export class Orchestrator {
     const repo = this.repo!;
     const saved = savedBrand(repo.readMain("docs/brand/brand.json"));
     if (saved) {
-      this.applyBrand(saved);
+      await this.applyBrand(saved);
       this.board.log("info", `Using the existing brand: ${saved.name}`, { agentId: IDS.marketing });
       return;
+    }
+    // The brand file exists but isn't marketing's: something overwrote it.
+    // Bring back the last version marketing committed.
+    if (repo.readMain("docs/brand/brand.json").trim()) {
+      for (const version of await repo.versions("docs/brand/brand.json")) {
+        const approved = savedBrand(version);
+        if (!approved) continue;
+        await repo.commitToMain(brandFiles(approved, repo.readMain("README.md"), false), `Marketing: restore the approved brand ${approved.name}`);
+        this.brandIsNew = true;
+        await this.applyBrand(approved);
+        this.board.log("warn", `Restored the approved brand ${approved.name}: docs/brand had been overwritten`, { agentId: IDS.marketing });
+        return;
+      }
     }
     if (!this.cfg.marketing) return;
     const currentName = this.existing ? this.board.project!.name : undefined;
@@ -477,26 +496,36 @@ export class Orchestrator {
       };
     });
 
-    const readme = repo.readMain("README.md").replace(/^# .*$/m, `# ${plan.name}\n\n> ${plan.tagline}`);
-    await repo.commitToMain(
-      {
-        "docs/brand/BRAND.md": renderBrand(plan),
-        "docs/brand/logo.svg": `${plan.logoSvg}\n`,
-        "docs/brand/brand.json": `${JSON.stringify(plan, null, 2)}\n`,
-        "README.md": readme,
-      },
-      `Marketing: brand ${plan.name}, logo and voice`,
-    );
-    this.applyBrand(plan);
+    await repo.commitToMain(brandFiles(plan, repo.readMain("README.md"), true), `Marketing: brand ${plan.name}, logo and voice`);
+    this.brandIsNew = true;
+    await this.applyBrand(plan);
     this.board.log("info", `The product is now ${plan.name}: "${plan.tagline}"`, { agentId: IDS.marketing });
   }
 
-  private applyBrand(plan: BrandPlan): void {
+  /**
+   * Make the brand the product's: its name, and a note at the top of the
+   * PRD. A PRD written before the brand may still call the name a
+   * placeholder or ask for brand work; the note settles both for everyone
+   * who reads it after.
+   */
+  private async applyBrand(plan: BrandPlan): Promise<void> {
     this.brandDoc = renderBrand(plan);
     this.board.updateProject({ name: plan.name, brand: toBrand(plan) });
+    const note = `> **Product name: ${plan.name}.** The brand (name, tagline, logo, colors, voice) is approved and final: see \
+docs/brand/BRAND.md and docs/brand/logo.svg. Wherever this PRD uses another or placeholder name, or asks for brand work, that \
+is done: build with this brand.`;
+    if (!this.prd.startsWith("> **Product name:")) {
+      this.prd = `${note}\n\n${this.prd}`;
+      await this.repo!.commitToMain({ "docs/PRD.md": this.prd }, `PM: note the approved brand ${plan.name} in the PRD`);
+    }
     if (this.board.agents.some((a) => a.id === IDS.marketing)) {
       this.board.updateAgent(IDS.marketing, { activity: `Brand: ${plan.name}` });
     }
+  }
+
+  private brandForTickets(apply: boolean): { name: string; doc: string; apply: boolean } | undefined {
+    const brand = this.board.project?.brand;
+    return brand && this.brandDoc ? { name: brand.name, doc: this.brandDoc, apply } : undefined;
   }
 
   /**
@@ -614,16 +643,37 @@ export class Orchestrator {
     return areas;
   }
 
-  private createTickets(planned: { key: string; title: string; description: string; acceptance: string[]; area?: string; files: string[]; dependsOn: string[]; priority: number; size?: TicketSize }[], areas: Area[], kind?: "change"): void {
+  private createTickets(planned: { key: string; title: string; description: string; acceptance: string[]; area?: string; files: string[]; dependsOn: string[]; priority: number; size?: TicketSize }[], areas: Area[], kind?: "change"): number {
+    // Brand, design, PRD and areas belong to their teams. A ticket can't
+    // claim them: their files are dropped, and a ticket left with no files
+    // (say, "write the brand kit") is dropped as work that's already done.
+    const dropped = new Set<string>();
+    const kept = planned.flatMap((p) => {
+      const files = p.files.filter((f) => !isProtected(f));
+      if (files.length === p.files.length) return [p];
+      const gone = p.files.filter((f) => isProtected(f));
+      if (files.length === 0) {
+        dropped.add(p.key);
+        this.board.log("warn", `Dropped ticket "${p.title}": it only changes ${gone.join(", ")}, which belong to marketing, the designer or the PM`, {
+          agentId: IDS.taskCreator,
+        });
+        return [];
+      }
+      this.board.log("warn", `Ticket "${p.title}" can't change ${gone.join(", ")} (owned by another team); kept the rest`, {
+        agentId: IDS.taskCreator,
+      });
+      return [{ ...p, files }];
+    });
+
     const idByKey = new Map<string, string>();
-    for (const p of planned) idByKey.set(p.key, this.board.nextTicketId());
+    for (const p of kept) idByKey.set(p.key, this.board.nextTicketId());
     const areaIds = new Set(areas.map((a) => a.id));
 
-    for (const p of planned) {
+    for (const p of kept) {
       const area = this.areaFor(p.files, p.area && areaIds.has(p.area) ? p.area : undefined, p.title, areas);
       const dependsOn = p.dependsOn.flatMap((k) => {
         const id = idByKey.get(k);
-        if (!id) this.board.log("warn", `Ticket "${p.title}" depends on unknown key "${k}"; ignored`);
+        if (!id && !dropped.has(k)) this.board.log("warn", `Ticket "${p.title}" depends on unknown key "${k}"; ignored`);
         return id ? [id] : [];
       });
       this.board.addTicket({
@@ -640,8 +690,9 @@ export class Orchestrator {
         ...(kind ? { kind } : {}),
       });
     }
-    this.board.log("info", `Task creator filed ${planned.length} ${kind === "change" ? "change " : ""}tickets`);
+    this.board.log("info", `Task creator filed ${kept.length} ${kind === "change" ? "change " : ""}tickets`);
     this.allocateBudgets();
+    return kept.length;
   }
 
   /** The area owning a ticket's files; falls back to a hint, then the shared area. */
@@ -709,14 +760,14 @@ export class Orchestrator {
           areas,
           { request: feedback, existingFiles: await repo.listFiles() },
           this.designDoc || undefined,
+          false,
+          this.brandForTickets(false),
         ),
         cwd: repo.dir,
         canWrite: false,
         context: { prd: this.prd, areas, changeRequest: feedback },
       });
-      const planned = changePlan.tickets;
-      this.createTickets(planned, areas, "change");
-      return planned.length;
+      return this.createTickets(changePlan.tickets, areas, "change");
     } catch (err) {
       if (this.abort.signal.aborted) return 0;
       this.board.log("warn", `Couldn't turn your feedback into tickets: ${(err as Error).message}`, { agentId: IDS.taskCreator });
@@ -818,6 +869,7 @@ export class Orchestrator {
 
     const areas = [...this.board.areas];
     for (const bug of report.bugs) {
+      bug.files = bug.files.filter((f) => !isProtected(f));
       const area = this.areaFor(bug.files, undefined, `Bug: ${bug.title}`, areas);
       const steps = bug.steps.length ? `\n\nSteps to reproduce:\n${bug.steps.map((x, i) => `${i + 1}. ${x}`).join("\n")}` : "";
       this.board.addTicket({
@@ -859,9 +911,9 @@ export class Orchestrator {
     const earlier = this.board.tickets
       .filter((t) => t.kind === "design")
       .map((t) => ({ title: t.title.replace(/^Design: /, ""), fixed: t.status === "done" }));
-    let report: QaReport;
+    let report: DesignReview;
     try {
-      ({ value: report } = await this.runForJson(QaReportSchema, IDS.designer, {
+      ({ value: report } = await this.runForJson(DesignReviewSchema, IDS.designer, {
         kind: "design_review",
         systemPrompt: systemPrompts.design_reviewer,
         prompt: designReviewPrompt(this.prd, [...this.board.areas], round, earlier),
@@ -880,13 +932,22 @@ export class Orchestrator {
     } finally {
       await repo.closeWorktree(scratch, true);
     }
-    const shots = this.screens.length
-      ? `${this.screens.length} screenshot${this.screens.length === 1 ? "" : "s"}`
-      : "no screenshots";
+    const scored = report.scores.length
+      ? ` Scores: ${report.scores.map((s) => `${s.screen} ${s.score}/5${s.score < 4 && s.why ? ` (${s.why})` : ""}`).join(", ")}.`
+      : "";
+    const shots = `${
+      this.screens.length ? `${this.screens.length} screenshot${this.screens.length === 1 ? "" : "s"}` : "no screenshots"
+    }`;
+    const low = report.scores.filter((s) => s.score < 4);
+    if (low.length > 0 && report.bugs.length === 0) {
+      this.board.log("warn", `The designer scored ${low.map((s) => s.screen).join(", ")} below 4/5 but filed no issues`, {
+        agentId: IDS.designer,
+      });
+    }
 
     if (report.verdict === "pass" || report.bugs.length === 0) {
       this.designIssues = [];
-      this.designNotes.push(`Round ${round}: passed (${shots}). ${report.summary}`.trim());
+      this.designNotes.push(`Round ${round}: passed (${shots}).${scored} ${report.summary}`.trim());
       this.board.updateAgent(IDS.designer, { activity: `Design review ${round} passed` });
       this.board.log("info", `Design review round ${round} passed (${shots})`, { agentId: IDS.designer });
       return 0;
@@ -894,7 +955,7 @@ export class Orchestrator {
 
     if (round >= this.cfg.qaRounds) {
       this.designIssues = report.bugs.map((b) => `${b.title} (${b.severity})`);
-      this.designNotes.push(`Round ${round}: ${report.bugs.length} issue(s) still visible (${shots}). ${report.summary}`.trim());
+      this.designNotes.push(`Round ${round}: ${report.bugs.length} issue(s) still visible (${shots}).${scored} ${report.summary}`.trim());
       this.board.updateAgent(IDS.designer, { activity: `Design review ${round}: ${report.bugs.length} still open` });
       this.board.log("warn", `Design review round ${round} still found ${report.bugs.length} issue(s); listed on the release card`, {
         agentId: IDS.designer,
@@ -904,6 +965,7 @@ export class Orchestrator {
 
     const areas = [...this.board.areas];
     for (const bug of report.bugs) {
+      bug.files = bug.files.filter((f) => !isProtected(f));
       const area = this.areaFor(bug.files, undefined, `Design: ${bug.title}`, areas);
       const steps = bug.steps.length ? `\n\nWhere to see it:\n${bug.steps.map((x, i) => `${i + 1}. ${x}`).join("\n")}` : "";
       this.board.addTicket({
@@ -922,7 +984,7 @@ Found by the designer in design review round ${round} (${bug.severity}). Follow 
       this.traceBug(bug.title, bug.files);
     }
     this.allocateBudgets();
-    this.designNotes.push(`Round ${round}: filed ${report.bugs.length} design issue(s) (${shots}). ${report.summary}`.trim());
+    this.designNotes.push(`Round ${round}: filed ${report.bugs.length} design issue(s) (${shots}).${scored} ${report.summary}`.trim());
     this.board.updateAgent(IDS.designer, { activity: `Design review ${round}: filed ${report.bugs.length} issue(s)` });
     this.board.log("warn", `Design review round ${round} filed ${report.bugs.length} issue(s)`, { agentId: IDS.designer });
     return report.bugs.length;
@@ -1144,6 +1206,15 @@ ${log.slice(0, 15).map((l) => `- ${l}`).join("\n")}`;
     // Lease check: touching files someone else holds is a conflict.
     const changed = await repo.changedFiles(t.id);
     for (const x of tickets) this.board.updateTicket(x.id, { changedFiles: changed });
+    const owned = changed.filter((f) => isProtected(f));
+    if (owned.length > 0) {
+      return this.sendBack(
+        a,
+        `Changed ${owned.join(", ")}. The brand (docs/brand), design (docs/design, docs/screens), PRD and areas are owned by ` +
+          "marketing, the designer, the PM and the tech lead, and are read-only for engineers. Use them as they are; put your work in the app's own files.",
+        { discardBranch: true },
+      );
+    }
     const others = this.board.leases.filter((l) => l.ticketId !== t.id);
     const clashes = others.filter((l) => anyOverlap(l.files, changed));
     if (clashes.length > 0) {
@@ -1592,6 +1663,16 @@ function savedBrand(json: string): BrandPlan | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** Marketing's brand files; a new brand also renames the README. */
+function brandFiles(plan: BrandPlan, readme: string, rename: boolean): Record<string, string> {
+  return {
+    "docs/brand/BRAND.md": renderBrand(plan),
+    "docs/brand/logo.svg": `${plan.logoSvg}\n`,
+    "docs/brand/brand.json": `${JSON.stringify(plan, null, 2)}\n`,
+    ...(rename ? { "README.md": readme.replace(/^# .*$/m, `# ${plan.name}\n\n> ${plan.tagline}`) } : {}),
+  };
 }
 
 /** Fallback tokens when the designer gave none: the brand colors as custom properties. */

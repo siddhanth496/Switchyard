@@ -25,7 +25,7 @@ pnpm api           # API + live events on http://localhost:4000
 pnpm web           # UI on http://localhost:3000
 ```
 
-Pick **Demo agents** in the UI to watch the flow for free, or **Claude agents** for real work.
+Pick **Demo agents** in the UI to watch the flow for free, or **Claude agents** for real work. To try the failure flow with demo agents, start the API with `MOCK_FAIL="App shell" pnpm api`: that ticket always fails.
 
 ### Using real Claude agents
 
@@ -61,7 +61,7 @@ This is the core of the design.
 - **Ownership areas** are path prefixes defined by the tech lead and approved by you. Each area has a lead; hotspots (manifests, schema) go in a small shared area owned by the tech lead.
 - **File leases** are held from start until merge. If an engineer touches files another ticket holds, the attempt is discarded and sent back.
 - **Owner notes** (`docs/owners/<area>.md` in the product repo) carry context across sessions. Engineers read them before each ticket; after a merge, the engineer's notes are recorded under the area lead's name, so the lead is the single writer.
-- **Retries**: rejected reviews and failed builds go back to *ready* with feedback. After 3 attempts a ticket fails; you can retry it from the board.
+- **Failures don't block the build.** A rejected review, failed build or merge conflict sends the ticket back with feedback. The owner gets the first two attempts; the third is **escalated to the tech lead** with the full failure history (and, with Claude agents, the next model up: Haiku → Sonnet → Opus). If that fails too, a decision card asks you to **retry with guidance** or **skip** the ticket. Independent tickets keep building while you decide. Skipped tickets count as resolved: dependents start, told to stub around the missing work, and the release notes list what was skipped. In unattended runs (`--auto`), failed tickets are skipped rather than retried, so a broken ticket can't burn the budget.
 - **CFO** tracks spend per ticket and agent. At the budget, dispatch pauses until you approve more.
 
 ## Layout
@@ -90,7 +90,8 @@ workspace/             generated product repos (gitignored)
 | POST | `/api/projects` | `{ idea, runner?, engineersPerArea?, floaters?, budgetUsd?, model? }` |
 | POST | `/api/gates/:id/approve` | `{ feedback? }` |
 | POST | `/api/gates/:id/reject` | `{ feedback }` |
-| POST | `/api/tickets/:id/retry` | |
+| POST | `/api/tickets/:id/retry` | `{ guidance? }` |
+| POST | `/api/tickets/:id/skip` | |
 | POST | `/api/stop` | |
 
 ## What's next

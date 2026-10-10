@@ -416,7 +416,7 @@ h3 {
 
 .board {
   display: grid;
-  grid-template-columns: repeat(var(--cols, 4), minmax(150px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: 12px;
   overflow-x: auto;
   padding-bottom: 4px;
@@ -759,4 +759,19 @@ h3 {
   * {
     transition: none !important;
   }
+}
+
+/* ---- escalation and skipped tickets ----------------------------------- */
+
+.ticket .line.escalated {
+  color: var(--review);
+  font-weight: 500;
+}
+.ticket.s-skipped {
+  opacity: 0.6;
+  border-style: dashed;
+}
+.ticket .actions {
+  display: flex;
+  gap: 6px;
 }

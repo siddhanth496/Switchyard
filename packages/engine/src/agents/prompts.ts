@@ -87,8 +87,28 @@ Break the work into tickets. Finish with a JSON block:
 \`\`\``;
 }
 
-export function buildPrompt(ticket: Ticket, ownerNotes: string, prd: string): string {
-  return `Ticket ${ticket.id}: ${ticket.title}
+export interface BuildExtras {
+  /** Dependencies the CEO skipped: their work is not in the codebase. */
+  skippedDeps?: { id: string; title: string }[];
+  /** Set when the tech lead takes over after repeated failures. */
+  escalation?: { failures: string[] };
+}
+
+export function buildPrompt(ticket: Ticket, ownerNotes: string, prd: string, extras: BuildExtras = {}): string {
+  const escalation = extras.escalation
+    ? `\nESCALATED: you are the tech lead taking over after ${extras.escalation.failures.length} failed attempts. \
+Find the root cause instead of repeating them. If the ticket is too big or wrongly scoped, deliver the smallest \
+version that meets the acceptance criteria and say what is left in your report.
+Earlier attempts failed because:
+${extras.escalation.failures.map((f, i) => `${i + 1}. ${f}`).join("\n")}
+`
+    : "";
+  const skipped = extras.skippedDeps?.length
+    ? `\nNote: the CEO skipped ${extras.skippedDeps.map((d) => `${d.id} (${d.title})`).join(", ")}. That work is NOT in \
+the codebase. Build without it: stub or mock anything you need from it, and note the stubs in your report.
+`
+    : "";
+  return `Ticket ${ticket.id}: ${ticket.title}${escalation}${skipped}
 
 ${ticket.description}
 

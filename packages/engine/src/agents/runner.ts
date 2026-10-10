@@ -14,6 +14,8 @@ export interface AgentTask {
   /** Whether the agent may edit files and run commands. */
   canWrite: boolean;
   maxTurns?: number;
+  /** A last-chance attempt after repeated failures; runners may use a stronger model. */
+  escalated?: boolean;
   /** Structured context, so test and mock runners don't need to parse prompts. */
   context: {
     idea?: string;

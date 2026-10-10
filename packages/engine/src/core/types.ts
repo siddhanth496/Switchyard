@@ -20,7 +20,8 @@ export type TicketStatus =
   | "in_progress" // an engineer holds it, with file leases
   | "review" // built and committed, waiting for review
   | "done" // merged into main
-  | "failed"; // gave up after too many attempts
+  | "failed" // out of attempts, waiting on the CEO
+  | "skipped"; // the CEO chose to skip it; dependents go ahead without it
 
 export interface Ticket {
   id: string;
@@ -42,6 +43,10 @@ export interface Ticket {
   feedback?: string;
   /** Files the last attempt actually changed. */
   changedFiles?: string[];
+  /** Why each failed attempt failed, oldest first. */
+  failures?: string[];
+  /** True when the next attempt goes to the tech lead. */
+  escalated?: boolean;
   costUsd: number;
   createdAt: number;
   updatedAt: number;
@@ -84,7 +89,7 @@ export interface Lease {
   acquiredAt: number;
 }
 
-export type GateKind = "prd" | "architecture" | "spend" | "release";
+export type GateKind = "prd" | "architecture" | "spend" | "release" | "ticket_failed";
 export type GateStatus = "pending" | "approved" | "rejected";
 
 export interface Gate {
@@ -95,6 +100,8 @@ export interface Gate {
   content: string;
   status: GateStatus;
   feedback?: string;
+  /** The ticket a "ticket_failed" gate is about. */
+  ticketId?: string;
   createdAt: number;
   resolvedAt?: number;
 }

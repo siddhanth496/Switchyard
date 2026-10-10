@@ -164,6 +164,34 @@ describe("dispatcher", () => {
     ]);
   });
 
+  it("sends an escalated ticket to the tech lead only", () => {
+    const plan = planDispatch({
+      tickets: [ticket("A", { files: ["web/a.ts"], escalated: true })],
+      areas,
+      agents,
+      leases: [],
+    });
+    expect(plan.assignments.map((a) => a.agentId)).toEqual(["tl"]);
+    const busy = planDispatch({
+      tickets: [ticket("A", { files: ["web/a.ts"], escalated: true })],
+      areas,
+      agents: agents.map((a) => (a.id === "tl" ? { ...a, status: "working" as const } : a)),
+      leases: [],
+    });
+    expect(busy.assignments).toHaveLength(0);
+    expect(busy.waiting[0]?.reason).toMatch(/tech lead/);
+  });
+
+  it("treats a skipped dependency as resolved", () => {
+    const plan = planDispatch({
+      tickets: [ticket("A", { files: ["web/a.ts"], status: "skipped" }), ticket("B", { files: ["web/b.ts"], dependsOn: ["A"] })],
+      areas,
+      agents,
+      leases: [],
+    });
+    expect(plan.assignments.map((a) => a.ticketId)).toEqual(["B"]);
+  });
+
   it("does not lend below the threshold", () => {
     const plan = planDispatch(
       {

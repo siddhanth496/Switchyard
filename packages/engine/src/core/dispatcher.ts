@@ -13,6 +13,9 @@ import type { Agent, Area, Lease, Ticket } from "./types.js";
  *  4. An idle member of the area takes it (the lead first). If none is idle
  *     and the area's backlog is at the lending threshold, an idle engineer
  *     is lent: a floater first, then one whose own area has nothing ready.
+ *     An escalated ticket waits for the tech lead instead.
+ *
+ * A skipped dependency counts as resolved: the CEO chose to go on without it.
  */
 
 export interface DispatchInput {
@@ -63,7 +66,9 @@ export function planDispatch(input: DispatchInput, options: DispatchOptions = {}
 
   const areaById = new Map(input.areas.map((a) => [a.id, a]));
   const agentById = new Map(input.agents.map((a) => [a.id, a]));
-  const done = new Set(input.tickets.filter((t) => t.status === "done").map((t) => t.id));
+  const done = new Set(
+    input.tickets.filter((t) => t.status === "done" || t.status === "skipped").map((t) => t.id),
+  );
   const known = new Set(input.tickets.map((t) => t.id));
 
   const ready = input.tickets
@@ -135,6 +140,19 @@ export function planDispatch(input: DispatchInput, options: DispatchOptions = {}
     }
 
     // 4. Who builds it
+    if (ticket.escalated) {
+      const lead = input.agents.find((a) => a.role === "tech_lead" && isFree(a.id));
+      if (!lead) {
+        waiting.push({ ticketId: ticket.id, reason: "escalated, waiting for the tech lead" });
+        continue;
+      }
+      assignments.push({ ticketId: ticket.id, agentId: lead.id, files, lent: lead.area !== area.id });
+      liveLeases.push({ ticketId: ticket.id, agentId: lead.id, files, acquiredAt: 0 });
+      busy.add(lead.id);
+      running.set(area.id, (running.get(area.id) ?? 0) + 1);
+      readyByArea.set(area.id, (readyByArea.get(area.id) ?? 1) - 1);
+      continue;
+    }
     const ordered = [area.lead, ...area.members.filter((m) => m !== area.lead)];
     let agentId = ordered.find(isFree);
     let lent = false;

@@ -124,18 +124,28 @@ export class Orchestrator {
     return gate;
   }
 
-  /** Put a failed ticket back on the board for another round. */
-  retry(ticketId: string): Ticket {
+  /** Give a failed ticket another round, optionally with guidance for the engineer. */
+  retry(ticketId: string, guidance?: string): Ticket {
     const t = this.board.ticket(ticketId);
     if (t.status !== "failed") throw new Error(`${ticketId} is ${t.status}, not failed`);
-    const updated = this.board.moveTicket(ticketId, "ready", { attempts: 0 });
-    this.board.log("info", `CEO put ${ticketId} back on the board`, { ticketId });
-    if (this.board.project && ["failed", "building"].includes(this.board.project.phase)) {
-      this.board.updateProject({ phase: "building" });
-      this.ensureBuildLoop();
-    }
-    this.poke();
-    return updated;
+    const gate = this.pendingFailureGate(ticketId);
+    if (gate) this.approve(gate.id, guidance);
+    else this.resolveFailed(ticketId, true, guidance);
+    return this.board.ticket(ticketId);
+  }
+
+  /** Leave a failed ticket out; tickets that depend on it go ahead without it. */
+  skip(ticketId: string): Ticket {
+    const t = this.board.ticket(ticketId);
+    if (t.status !== "failed") throw new Error(`${ticketId} is ${t.status}, not failed`);
+    const gate = this.pendingFailureGate(ticketId);
+    if (gate) this.reject(gate.id, "Skipped");
+    else this.resolveFailed(ticketId, false);
+    return this.board.ticket(ticketId);
+  }
+
+  private pendingFailureGate(ticketId: string): Gate | undefined {
+    return this.board.gates.find((g) => g.kind === "ticket_failed" && g.ticketId === ticketId && g.status === "pending");
   }
 
   /** Stop dispatching and abort running agents. */
@@ -281,7 +291,13 @@ export class Orchestrator {
       this.abort.signal.addEventListener("abort", () => rej(new Error("aborted")), { once: true });
     });
     this.board.log("info", `Waiting on CEO: ${gate.title}`);
-    if (auto) queueMicrotask(() => this.approve(gate.id, "auto-approved"));
+    // Under "all", a failed ticket is skipped rather than retried, so an
+    // unattended run can't loop on a broken ticket and burn the budget.
+    if (gate.kind === "ticket_failed" && this.cfg.autoApprove === "all") {
+      queueMicrotask(() => this.reject(gate.id, "auto-skipped"));
+    } else if (auto) {
+      queueMicrotask(() => this.approve(gate.id, "auto-approved"));
+    }
     return p;
   }
 
@@ -359,7 +375,8 @@ export class Orchestrator {
     let stuck: string[] = [];
     while (!this.abort.signal.aborted) {
       const project = this.board.project!;
-      const open = this.board.tickets.filter((t) => !["done", "failed"].includes(t.status));
+      // Failed tickets stay open: they wait on a CEO decision, not on us.
+      const open = this.board.tickets.filter((t) => !["done", "skipped"].includes(t.status));
       if (open.length === 0 && this.running.size === 0) break;
 
       if (project.phase === "building") {
@@ -368,10 +385,14 @@ export class Orchestrator {
           { lendThreshold: this.cfg.lendThreshold },
         );
         for (const a of plan.assignments) this.startTicket(a);
-        // Nothing running and nothing startable: only the CEO can unblock this.
+        // Nothing running and nothing startable. If a failure is waiting on
+        // the CEO, wait for that decision; otherwise nothing can unblock it.
         if (plan.assignments.length === 0 && this.running.size === 0) {
-          stuck = plan.waiting.map((w) => `${w.ticketId} (${w.reason})`);
-          break;
+          const awaitingCeo = this.board.tickets.some((t) => t.status === "failed" && this.pendingFailureGate(t.id));
+          if (!awaitingCeo) {
+            stuck = plan.waiting.map((w) => `${w.ticketId} (${w.reason})`);
+            break;
+          }
         }
       }
       await this.sleepUntilWoken();
@@ -379,20 +400,18 @@ export class Orchestrator {
     await Promise.allSettled(this.running.values());
     if (this.abort.signal.aborted) return;
 
-    const failed = this.board.tickets.filter((t) => t.status === "failed");
-    if (failed.length > 0 || stuck.length > 0) {
+    if (stuck.length > 0) {
       this.board.updateProject({ phase: "failed" });
-      const parts = [];
-      if (failed.length > 0) parts.push(`${failed.map((t) => t.id).join(", ")} failed`);
-      if (stuck.length > 0) parts.push(`blocked: ${stuck.join("; ")}`);
-      this.board.log("error", `Build stopped: ${parts.join(". ")}. Retry failed tickets to continue.`);
+      this.board.log("error", `Build stopped, blocked: ${stuck.join("; ")}`);
       return;
     }
 
     this.board.updateProject({ phase: "releasing" });
     const log = await this.repo!.log(50);
-    const summary = `All ${this.board.tickets.length} tickets merged into main.
-
+    const merged = this.board.tickets.filter((t) => t.status === "done");
+    const skipped = this.board.tickets.filter((t) => t.status === "skipped");
+    const summary = `${merged.length} of ${this.board.tickets.length} tickets merged into main.
+${skipped.length > 0 ? `\n**Skipped by you:** ${skipped.map((t) => `${t.id} ${t.title}`).join(", ")}. Dependents were built without them, using stubs.\n` : ""}
 **Spend:** $${this.board.project!.spentUsd.toFixed(2)} of $${this.board.project!.budgetUsd.toFixed(2)}
 
 **Repo:** \`${this.repo!.dir}\`
@@ -452,14 +471,22 @@ ${log.slice(0, 15).map((l) => `- ${l}`).join("\n")}`;
     const notes = repo.readMain(`docs/owners/${t.area}.md`);
 
     // Build
+    const skippedDeps = t.dependsOn
+      .map((id) => this.board.ticket(id))
+      .filter((d) => d.status === "skipped")
+      .map((d) => ({ id: d.id, title: d.title }));
     const build = await this.runAgent(
       a.agentId,
       {
         kind: "build",
         systemPrompt: systemPrompts.engineer,
-        prompt: buildPrompt(t, notes, this.prd),
+        prompt: buildPrompt(t, notes, this.prd, {
+          skippedDeps,
+          escalation: t.escalated ? { failures: t.failures ?? [] } : undefined,
+        }),
         cwd: worktree,
         canWrite: true,
+        escalated: t.escalated,
         context: { ticket: { ...t }, prd: this.prd },
       },
       t.id,
@@ -549,19 +576,74 @@ ${log.slice(0, 15).map((l) => `- ${l}`).join("\n")}`;
     this.checkBudget();
   }
 
-  /** A failed or rejected attempt: back to ready with feedback, or failed. */
+  /**
+   * A failed or rejected attempt. The owner gets the early attempts; the
+   * last one is escalated to the tech lead with the full failure history.
+   * If that fails too, the CEO decides: retry with guidance, or skip.
+   */
   private async sendBack(a: Assignment, feedback: string, opts: { discardBranch?: boolean } = {}): Promise<void> {
     const t = this.board.ticket(a.ticketId);
     const attempts = t.attempts + 1;
+    const failures = [...(t.failures ?? []), feedback];
     await this.repo!.closeWorktree(t.id, opts.discardBranch ?? false).catch(() => undefined);
     this.board.releaseLease(t.id);
-    const giveUp = attempts >= this.cfg.maxAttempts;
-    this.board.moveTicket(t.id, giveUp ? "failed" : "ready", { attempts, feedback, assignee: undefined });
     this.board.updateAgent(a.agentId, { status: "idle", currentTicket: undefined, activity: `Sent back ${t.id}` });
-    this.board.log(giveUp ? "error" : "warn", `${t.id} ${giveUp ? "failed" : "sent back"}: ${feedback}`, {
-      ticketId: t.id,
-      agentId: a.agentId,
-    });
+    const meta = { ticketId: t.id, agentId: a.agentId };
+
+    if (attempts >= this.cfg.maxAttempts) {
+      this.board.moveTicket(t.id, "failed", { attempts, feedback, failures, assignee: undefined, escalated: false });
+      this.board.log("error", `${t.id} failed after ${attempts} attempts: ${feedback}`, meta);
+      this.askCeoAboutFailure(t.id);
+      return;
+    }
+
+    const escalate = attempts === this.cfg.maxAttempts - 1;
+    this.board.moveTicket(t.id, "ready", { attempts, feedback, failures, assignee: undefined, escalated: escalate });
+    this.board.log("warn", `${t.id} sent back: ${feedback}`, meta);
+    if (escalate) this.board.log("info", `${t.id} escalated to the tech lead for its last attempt`, meta);
+  }
+
+  /** Open a decision card for a failed ticket. Other work keeps going meanwhile. */
+  private askCeoAboutFailure(ticketId: string): void {
+    const t = this.board.ticket(ticketId);
+    const waiting = this.board.tickets.filter((x) => x.dependsOn.includes(ticketId) && !["done", "skipped"].includes(x.status));
+    const content = `**${t.id}: ${t.title}** failed ${t.attempts} times, the last attempt by the tech lead.
+
+**Why each attempt failed**
+
+${(t.failures ?? []).map((f, i) => `${i + 1}. ${f}`).join("\n")}
+
+**Waiting on it:** ${waiting.length > 0 ? waiting.map((x) => `${x.id} ${x.title}`).join(", ") : "nothing else"}. Other tickets keep building while you decide.
+
+- **Retry with guidance:** your note goes to the owner engineer, who gets fresh attempts with the tech lead as backup.
+- **Skip this ticket:** it's left out. Tickets that depend on it go ahead and stub around it, and the release notes list it.`;
+    const gate = this.board.openGate("ticket_failed", `${t.id} failed: ${t.title}`, content, t.id);
+    void this.waitForGate(gate).then(
+      (g) => this.resolveFailed(ticketId, g.status === "approved", g.feedback),
+      () => undefined,
+    );
+  }
+
+  private resolveFailed(ticketId: string, retry: boolean, guidance?: string): void {
+    const t = this.board.ticket(ticketId);
+    if (t.status !== "failed") return;
+    const note = guidance?.trim() && guidance !== "auto-approved" ? guidance.trim() : undefined;
+    if (retry) {
+      this.board.moveTicket(ticketId, "ready", {
+        attempts: 0,
+        escalated: false,
+        feedback: note ? `CEO guidance: ${note}\n\nLast failure: ${t.feedback ?? ""}` : t.feedback,
+      });
+      this.board.log("info", `CEO sent ${ticketId} back for another round${note ? " with guidance" : ""}`, { ticketId });
+    } else {
+      this.board.moveTicket(ticketId, "skipped", { escalated: false });
+      this.board.log("warn", `CEO skipped ${ticketId}; tickets that depend on it go ahead without it`, { ticketId });
+    }
+    if (this.board.project?.phase === "failed") {
+      this.board.updateProject({ phase: "building" });
+      void this.ensureBuildLoop();
+    }
+    this.poke();
   }
 
   // ---- agents ----------------------------------------------------------

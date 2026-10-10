@@ -11,6 +11,7 @@ const FROM: Record<Gate["kind"], string> = {
   architecture: "From the tech lead",
   spend: "From the CFO",
   release: "From the tech lead",
+  ticket_failed: "From the tech lead",
 };
 
 const APPROVE: Record<Gate["kind"], string> = {
@@ -18,6 +19,7 @@ const APPROVE: Record<Gate["kind"], string> = {
   architecture: "Approve the architecture",
   spend: "Approve more budget",
   release: "Ship it",
+  ticket_failed: "Retry with this guidance",
 };
 
 /** The CEO's inbox. Only the oldest pending decision is shown in full. */
@@ -32,17 +34,20 @@ export function Decision({ gates }: { gates: Gate[] }) {
     return <div className="calm">Nothing needs your decision right now.</div>;
   }
 
+  const failure = gate.kind === "ticket_failed";
+
   async function act(kind: "approve" | "reject") {
     if (!gate) return;
-    if (kind === "reject" && !feedback.trim()) {
+    if (kind === "reject" && !failure && !feedback.trim()) {
       setError("Say what should change before sending it back.");
       return;
     }
     setBusy(true);
     setError(null);
     try {
-      if (kind === "approve") await api.approve(gate.id);
-      else await api.reject(gate.id, feedback.trim());
+      // For a failed ticket, the note travels with the retry as guidance.
+      if (kind === "approve") await api.approve(gate.id, failure ? feedback.trim() || undefined : undefined);
+      else await api.reject(gate.id, failure ? undefined : feedback.trim());
       setFeedback("");
     } catch (err) {
       setError((err as Error).message);
@@ -50,6 +55,44 @@ export function Decision({ gates }: { gates: Gate[] }) {
       setBusy(false);
     }
   }
+
+  const actions = failure ? (
+    <>
+      <textarea
+        aria-label="Guidance for the next attempt"
+        placeholder="Guidance for the next attempt (optional), e.g. use plain CSS, skip the animation..."
+        value={feedback}
+        onChange={(e) => {
+          setFeedback(e.target.value);
+          setError(null);
+        }}
+      />
+      <button className="btn-approve" disabled={busy} onClick={() => act("approve")}>
+        {feedback.trim() ? "Retry with this guidance" : "Retry"}
+      </button>
+      <button className="btn-changes" disabled={busy} onClick={() => act("reject")}>
+        Skip this ticket
+      </button>
+    </>
+  ) : (
+    <>
+      <button className="btn-approve" disabled={busy} onClick={() => act("approve")}>
+        {APPROVE[gate.kind]}
+      </button>
+      <textarea
+        aria-label="What should change"
+        placeholder="Or say what should change..."
+        value={feedback}
+        onChange={(e) => {
+          setFeedback(e.target.value);
+          setError(null);
+        }}
+      />
+      <button className="btn-changes" disabled={busy} onClick={() => act("reject")}>
+        {gate.kind === "spend" ? "Stop the build" : "Request changes"}
+      </button>
+    </>
+  );
 
   return (
     <section className="decision" aria-labelledby="decision-title">
@@ -61,21 +104,7 @@ export function Decision({ gates }: { gates: Gate[] }) {
         </div>
       </div>
       <div className="act">
-        <button className="btn-approve" disabled={busy} onClick={() => act("approve")}>
-          {APPROVE[gate.kind]}
-        </button>
-        <textarea
-          aria-label="What should change"
-          placeholder="Or say what should change..."
-          value={feedback}
-          onChange={(e) => {
-            setFeedback(e.target.value);
-            setError(null);
-          }}
-        />
-        <button className="btn-changes" disabled={busy} onClick={() => act("reject")}>
-          {gate.kind === "spend" ? "Stop the build" : "Request changes"}
-        </button>
+        {actions}
         {error && <p className="error">{error}</p>}
         {pending.length > 1 && <p className="queue">{pending.length - 1} more waiting after this one.</p>}
       </div>

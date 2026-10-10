@@ -45,8 +45,9 @@ export const api = {
   setKey: (key: string) => request<KeyStatus>("PUT", "/api/config/key", { key }),
   clearKey: () => request<KeyStatus>("DELETE", "/api/config/key"),
   start: (opts: StartOptions) => post("/api/projects", opts),
-  approve: (gateId: string) => post(`/api/gates/${gateId}/approve`),
-  reject: (gateId: string, feedback: string) => post(`/api/gates/${gateId}/reject`, { feedback }),
-  retry: (ticketId: string) => post(`/api/tickets/${ticketId}/retry`),
+  approve: (gateId: string, feedback?: string) => post(`/api/gates/${gateId}/approve`, feedback ? { feedback } : {}),
+  reject: (gateId: string, feedback?: string) => post(`/api/gates/${gateId}/reject`, feedback ? { feedback } : {}),
+  retry: (ticketId: string, guidance?: string) => post(`/api/tickets/${ticketId}/retry`, guidance ? { guidance } : {}),
+  skip: (ticketId: string) => post(`/api/tickets/${ticketId}/skip`),
   stop: () => post("/api/stop"),
 };

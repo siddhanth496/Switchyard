@@ -61,11 +61,19 @@ const StartSchema = z.object({
 });
 
 function makeRunner(kind: "mock" | "claude", model: string, budgetUsd: number): AgentRunner {
-  if (kind === "mock") return new MockRunner({ stepMs: 400, rejectFirstReviewOf: ["Notes CRUD API"] });
+  if (kind === "mock") {
+    // MOCK_FAIL="App shell" makes that demo ticket always fail, to try the failure flow.
+    const failBuildsOf = process.env.MOCK_FAIL ? process.env.MOCK_FAIL.split(",") : [];
+    return new MockRunner({ stepMs: 400, rejectFirstReviewOf: ["Notes CRUD API"], failBuildsOf });
+  }
   // Cap any single task at a quarter of the budget (min $0.50), so one
   // runaway agent can't blow through it before the CFO gate trips.
+  // Escalated attempts (after repeated failures) use the next model up.
+  const i = MODELS.findIndex((m) => m.id === model);
+  const escalationModel = MODELS[Math.min(i + 1, MODELS.length - 1)]?.id ?? model;
   return new ClaudeRunner({
     model,
+    escalationModel,
     apiKey: currentKey(),
     maxBudgetUsdPerTask: Math.max(0.5, budgetUsd / 4),
   });
@@ -175,11 +183,20 @@ app.post("/api/gates/:id/approve", async (c) => {
 });
 
 app.post("/api/gates/:id/reject", async (c) => {
-  const { feedback } = z.object({ feedback: z.string().min(1) }).parse(await c.req.json());
-  return c.json(requireOrch().reject(c.req.param("id"), feedback));
+  const id = c.req.param("id");
+  const gate = board.gate(id);
+  // Skipping a failed ticket needs no explanation; sending other work back does.
+  const schema = z.object({ feedback: gate.kind === "ticket_failed" ? z.string().default("Skipped") : z.string().min(1, "Say what should change.") });
+  const { feedback } = schema.parse(await c.req.json().catch(() => ({})));
+  return c.json(requireOrch().reject(id, feedback));
 });
 
-app.post("/api/tickets/:id/retry", (c) => c.json(requireOrch().retry(c.req.param("id"))));
+app.post("/api/tickets/:id/retry", async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as { guidance?: string };
+  return c.json(requireOrch().retry(c.req.param("id"), body.guidance));
+});
+
+app.post("/api/tickets/:id/skip", (c) => c.json(requireOrch().skip(c.req.param("id"))));
 
 app.post("/api/stop", (c) => {
   requireOrch().stop();

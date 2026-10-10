@@ -199,7 +199,7 @@ export class Board {
 
   // ---- gates -----------------------------------------------------------
 
-  openGate(kind: GateKind, title: string, content: string): Gate {
+  openGate(kind: GateKind, title: string, content: string, ticketId?: string): Gate {
     const gate: Gate = {
       id: `G-${++this.counters.gate}`,
       kind,
@@ -207,6 +207,7 @@ export class Board {
       content,
       status: "pending",
       createdAt: Date.now(),
+      ...(ticketId ? { ticketId } : {}),
     };
     this.state.gates.push(gate);
     this.emit({ type: "gate", gate: { ...gate } });

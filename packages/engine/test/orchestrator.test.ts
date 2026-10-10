@@ -126,30 +126,92 @@ describe("orchestrator (mock agents, real git)", () => {
 });
 
 describe("failures", () => {
-  it("stops when a failed ticket blocks others, and resumes after a retry", async () => {
-    let broken = true;
+  /** A runner whose "App shell and styles" build fails while `broken` is true. */
+  function flakyShell() {
+    const state = { broken: true, prompts: [] as { title: string; agent: string; prompt: string; escalated?: boolean }[] };
     const inner = new MockRunner({ stepMs: 0 });
     const runner: AgentRunner = {
       name: "flaky",
-      run: (task, onActivity) =>
-        broken && task.kind === "build" && task.context.ticket?.title === "App shell and styles"
-          ? Promise.resolve({ ok: false, text: "", costUsd: 0, error: "tests failed" })
-          : inner.run(task, onActivity),
+      run: (task, onActivity) => {
+        if (task.kind === "build") {
+          state.prompts.push({ title: task.context.ticket!.title, agent: task.agentId, prompt: task.prompt, escalated: task.escalated });
+          if (state.broken && task.context.ticket?.title === "App shell and styles") {
+            return Promise.resolve({ ok: false, text: "", costUsd: 0, error: "tests failed" });
+          }
+        }
+        return inner.run(task, onActivity);
+      },
     };
-    const orch = new Orchestrator(runner, { workspaceDir: workspace(), autoApprove: "all", tickMs: 5, maxAttempts: 2 });
+    return { state, runner };
+  }
 
-    const first = await orch.run("A notes app");
-    expect(first.phase).toBe("failed");
+  it("escalates the last attempt to the tech lead, then asks the CEO while other work continues", async () => {
+    const { state, runner } = flakyShell();
+    const orch = new Orchestrator(runner, {
+      workspaceDir: workspace(),
+      autoApprove: ["prd", "architecture", "release"],
+      tickMs: 5,
+    });
+    orch.start("A notes app");
+
+    const gate = await waitFor(() => orch.board.gates.find((g) => g.kind === "ticket_failed" && g.status === "pending"));
     const shell = orch.board.tickets.find((t) => t.title === "App shell and styles")!;
+    expect(gate.ticketId).toBe(shell.id);
     expect(shell.status).toBe("failed");
-    expect(shell.attempts).toBe(2);
-    // The pages that depend on the shell never started.
-    expect(orch.board.tickets.filter((t) => t.title.endsWith("page")).every((t) => t.status === "ready")).toBe(true);
 
-    broken = false;
-    orch.retry(shell.id);
+    // Attempts 1-2 by the web owner, attempt 3 by the tech lead on the stronger model.
+    const shellBuilds = state.prompts.filter((p) => p.title === "App shell and styles");
+    expect(shellBuilds.map((p) => p.agent)).toEqual(["eng-web-1", "eng-web-1", "tech-lead"]);
+    expect(shellBuilds[2]!.escalated).toBe(true);
+    expect(shellBuilds[2]!.prompt).toContain("ESCALATED");
+
+    // Independent work kept going; only the shell's dependents wait.
+    await waitFor(() =>
+      orch.board.tickets.filter((t) => t.title.includes("API") || t.title.startsWith("Project manifest")).every((t) => t.status === "done")
+        ? true
+        : undefined,
+    );
+    expect(orch.board.tickets.filter((t) => t.title.endsWith("page")).every((t) => t.status === "ready")).toBe(true);
+    expect(orch.board.project!.phase).toBe("building");
+
+    // Retry with guidance: it reaches the engineer, and the build ships.
+    state.broken = false;
+    orch.retry(shell.id, "Use plain CSS grid, no framework");
     await waitFor(() => (orch.board.project!.phase === "shipped" ? true : undefined), 20_000);
+    const retried = state.prompts.filter((p) => p.title === "App shell and styles").at(-1)!;
+    expect(retried.agent).toBe("eng-web-1");
+    expect(retried.prompt).toContain("CEO guidance: Use plain CSS grid, no framework");
     expect(orch.board.tickets.every((t) => t.status === "done")).toBe(true);
+  }, 30_000);
+
+  it("skipping a failed ticket unblocks its dependents", async () => {
+    const { state, runner } = flakyShell();
+    const orch = new Orchestrator(runner, {
+      workspaceDir: workspace(),
+      autoApprove: ["prd", "architecture", "release"],
+      tickMs: 5,
+    });
+    orch.start("A notes app");
+    const gate = await waitFor(() => orch.board.gates.find((g) => g.kind === "ticket_failed" && g.status === "pending"));
+    orch.skip(gate.ticketId!);
+
+    await waitFor(() => (orch.board.project!.phase === "shipped" ? true : undefined), 20_000);
+    const shell = orch.board.tickets.find((t) => t.id === gate.ticketId)!;
+    expect(shell.status).toBe("skipped");
+    const pages = orch.board.tickets.filter((t) => t.title.endsWith("page"));
+    expect(pages.every((t) => t.status === "done")).toBe(true);
+    const pagePrompt = state.prompts.find((p) => p.title === "Login page")!.prompt;
+    expect(pagePrompt).toContain(`skipped ${shell.id}`);
+    const release = orch.board.gates.find((g) => g.kind === "release")!;
+    expect(release.content).toContain("Skipped by you");
+  }, 30_000);
+
+  it("unattended runs skip a broken ticket instead of retrying forever", async () => {
+    const { runner } = flakyShell();
+    const orch = new Orchestrator(runner, { workspaceDir: workspace(), autoApprove: "all", tickMs: 5 });
+    const project = await orch.run("A notes app");
+    expect(project.phase).toBe("shipped");
+    expect(orch.board.tickets.find((t) => t.title === "App shell and styles")!.status).toBe("skipped");
   }, 30_000);
 });
 

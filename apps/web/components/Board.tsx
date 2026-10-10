@@ -11,6 +11,11 @@ const COLUMNS: { title: string; statuses: TicketStatus[]; empty: string }[] = [
   { title: "Merged", statuses: ["done"], empty: "Nothing merged yet." },
 ];
 
+const EXTRA_COLUMNS: { title: string; statuses: TicketStatus[]; empty: string }[] = [
+  { title: "Needs you", statuses: ["failed"], empty: "" },
+  { title: "Skipped", statuses: ["skipped"], empty: "" },
+];
+
 function TicketCard({
   ticket,
   tickets,
@@ -25,7 +30,11 @@ function TicketCard({
   const [busy, setBusy] = useState(false);
   const area = areas.find((a) => a.id === ticket.area);
   const assignee = agents.find((a) => a.id === ticket.assignee);
-  const waitingOn = ticket.dependsOn.filter((d) => tickets.find((t) => t.id === d)?.status !== "done");
+  const waitingOn = ticket.dependsOn.filter((d) => {
+    const s = tickets.find((t) => t.id === d)?.status;
+    return s !== "done" && s !== "skipped";
+  });
+  const skippedDeps = ticket.dependsOn.filter((d) => tickets.find((t) => t.id === d)?.status === "skipped");
   const lent = assignee && assignee.area !== ticket.area && ticket.status !== "done";
 
   return (
@@ -50,8 +59,14 @@ function TicketCard({
       {ticket.status === "ready" && waitingOn.length > 0 && (
         <div className="line wait">Waiting on {waitingOn.join(", ")}</div>
       )}
-      {ticket.attempts > 0 && ticket.status !== "done" && <div className="line">Attempt {ticket.attempts + 1}</div>}
-      {ticket.feedback && ticket.status !== "done" && <div className="feedback">{ticket.feedback}</div>}
+      {ticket.escalated && ticket.status !== "done" && <div className="line escalated">Escalated to the tech lead</div>}
+      {skippedDeps.length > 0 && ticket.status !== "done" && (
+        <div className="line wait">Building without {skippedDeps.join(", ")} (skipped)</div>
+      )}
+      {ticket.attempts > 0 && !["done", "failed", "skipped"].includes(ticket.status) && (
+        <div className="line">Attempt {ticket.attempts + 1}</div>
+      )}
+      {ticket.feedback && !["done", "skipped"].includes(ticket.status) && <div className="feedback">{ticket.feedback}</div>}
       {ticket.status === "failed" && (
         <div className="actions">
           <button
@@ -63,7 +78,18 @@ function TicketCard({
               setBusy(false);
             }}
           >
-            Retry ticket
+            Retry
+          </button>
+          <button
+            className="btn btn-quiet"
+            disabled={busy}
+            onClick={async () => {
+              setBusy(true);
+              await api.skip(ticket.id).catch(() => undefined);
+              setBusy(false);
+            }}
+          >
+            Skip
           </button>
         </div>
       )}
@@ -72,8 +98,10 @@ function TicketCard({
 }
 
 export function Board({ tickets, agents, areas }: { tickets: Ticket[]; agents: Agent[]; areas: Area[] }) {
-  const failed = tickets.filter((t) => t.status === "failed");
-  const columns = failed.length > 0 ? [...COLUMNS, { title: "Failed", statuses: ["failed"] as TicketStatus[], empty: "" }] : COLUMNS;
+  const shown = (c: { statuses: TicketStatus[] }) => tickets.some((t) => c.statuses.includes(t.status));
+  const [needsYou, skipped] = EXTRA_COLUMNS as [(typeof EXTRA_COLUMNS)[number], (typeof EXTRA_COLUMNS)[number]];
+  // Failures come first: they are waiting on you.
+  const columns = [...(shown(needsYou) ? [needsYou] : []), ...COLUMNS, ...(shown(skipped) ? [skipped] : [])];
 
   if (tickets.length === 0) {
     return (
@@ -86,7 +114,7 @@ export function Board({ tickets, agents, areas }: { tickets: Ticket[]; agents: A
   }
 
   return (
-    <section className="board" aria-label="Job board" style={{ "--cols": columns.length } as React.CSSProperties}>
+    <section className="board" aria-label="Job board">
       {columns.map((col) => {
         const items = tickets
           .filter((t) => col.statuses.includes(t.status))

@@ -8,6 +8,8 @@ export interface ClaudeRunnerOptions {
   maxBudgetUsdPerTask?: number;
   /** Anthropic API key. Falls back to ANTHROPIC_API_KEY in the environment. */
   apiKey?: string;
+  /** Model for escalated attempts (after repeated failures). Defaults to `model`. */
+  escalationModel?: string;
 }
 
 const READ_TOOLS = ["Read", "Glob", "Grep"];
@@ -38,7 +40,7 @@ export class ClaudeRunner implements AgentRunner {
         options: {
           cwd: task.cwd,
           systemPrompt: task.systemPrompt,
-          model: this.options.model,
+          model: task.escalated ? (this.options.escalationModel ?? this.options.model) : this.options.model,
           maxTurns: task.maxTurns ?? (task.canWrite ? 40 : 12),
           maxBudgetUsd: this.options.maxBudgetUsdPerTask,
           tools,

@@ -7,6 +7,8 @@ export interface MockRunnerOptions {
   stepMs?: number;
   /** Ticket titles (substring match) whose first review requests changes. */
   rejectFirstReviewOf?: string[];
+  /** Ticket titles (substring match) whose builds always fail, to demo the failure flow. */
+  failBuildsOf?: string[];
 }
 
 /**
@@ -19,10 +21,12 @@ export class MockRunner implements AgentRunner {
   private readonly stepMs: number;
   private readonly rejectOnce: string[];
   private readonly rejected = new Set<string>();
+  private readonly alwaysFail: string[];
 
   constructor(options: MockRunnerOptions = {}) {
     this.stepMs = options.stepMs ?? 250;
     this.rejectOnce = options.rejectFirstReviewOf ?? [];
+    this.alwaysFail = options.failBuildsOf ?? [];
   }
 
   async run(task: AgentTask, onActivity: ActivityListener, signal?: AbortSignal): Promise<AgentResult> {
@@ -53,6 +57,10 @@ export class MockRunner implements AgentRunner {
       case "build": {
         const t = task.context.ticket!;
         await step(`Reading owner notes for ${t.area}`);
+        if (this.alwaysFail.some((s) => t.title.includes(s))) {
+          await step("Running checks");
+          return { ok: false, text: "", costUsd: 0.01, error: "Build broke: 3 tests failing in the layout grid" };
+        }
         for (const f of t.files) {
           const file = f.endsWith("/") ? join(f, "index.ts") : f;
           await step(`Write: ${file}`);

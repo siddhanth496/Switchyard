@@ -4,6 +4,8 @@ export { planDispatch, leaseFilesFor, type Assignment, type DispatchPlan, type W
 export { normalizePath, covers, pathsOverlap, anyOverlap, owningArea, resolveArea, isProtected, PROTECTED_PATHS } from "./core/paths.js";
 export type { AgentRunner, AgentTask, AgentResult, TaskKind } from "./agents/runner.js";
 export { ClaudeRunner, type ClaudeRunnerOptions } from "./agents/claude.js";
+export { GeminiRunner, GEMINI_PRICES, geminiCost, type GeminiRunnerOptions } from "./agents/gemini.js";
+export { RoutedRunner, providerOf, type Provider, type RoutedRunnerOptions } from "./agents/router.js";
 export { MockRunner, type MockRunnerOptions } from "./agents/mock.js";
 export { ProjectRepo } from "./git/repo.js";
 export { Orchestrator, type OrchestratorConfig } from "./orchestrator/orchestrator.js";

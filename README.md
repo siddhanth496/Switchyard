@@ -71,17 +71,28 @@ Both teams are on by default; untick them on the start screen (or pass `--no-mar
 
 Each product gets its own git repo in `~/switchyard-workspace` by default (set `WORKSPACE` to change it). Keep it out of iCloud-synced folders such as Desktop and Documents: iCloud makes `file 2` copies of fast-changing files, which corrupts the agents' git worktrees. The server warns if the workspace looks synced. New product repos start with a `.gitignore` for dependencies, builds and secrets.
 
-### Using real Claude agents
+### Using real agents (Claude and Gemini)
 
 Claude agents run through the [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk/overview) and are billed to an Anthropic API key from [console.anthropic.com](https://console.anthropic.com).
 
-On the start screen, choose **Claude agents**, paste your API key, pick a model and set a budget:
+On the start screen, choose **Real agents**, paste your API key, pick a model and set a budget:
 
 - **API key**: held only in the server's memory, never written to disk or logged, and cleared when the server stops. The UI only ever shows its last 4 characters. You can also set `ANTHROPIC_API_KEY` before `pnpm api` instead.
-- **Model**: Haiku 5.5 (cheapest, good for testing), Sonnet 5.5 or Opus 5.5.
+- **Model**: Claude Haiku 5.5, Sonnet 5.5 or Opus 5.5, or a Gemini model (below).
 - **Budget**: work pauses at the budget until you approve more, and no single agent task can spend more than a quarter of it.
 
 When a key is set, agents always authenticate with it. Other credential settings in the environment (OAuth tokens, cloud providers) are ignored, so a Claude subscription login on the same machine is never used.
+
+#### Gemini
+
+Gemini models run through the [Gemini API](https://ai.google.dev/gemini-api/docs) with a key from [aistudio.google.com/apikey](https://aistudio.google.com/apikey). Paste it in the **Gemini API key** box (or set `GEMINI_API_KEY` before `pnpm api`). It's handled like the Anthropic key: memory only, last 4 characters shown.
+
+- **Mix providers per agent.** Every model picker lists Claude and Gemini models. Each agent's task goes to the provider of its model, so the designer can run on Claude Opus while engineers run on Gemini Flash. You only need a key for the providers your chosen models use; the start screen tells you which is missing and why.
+- **Models offered:** Gemini 3.1 Flash-Lite, 2.5 Flash, 3.5 Flash and 3.1 Pro (preview). Escalated tickets move one tier up within the engineers' provider.
+- **Key check:** when you save a Gemini key, the server asks Google to list one model (a free call). A rejected key is refused on the spot; if Google can't be reached, the key is saved and the first agent call decides.
+- **How Gemini agents work:** there's no agent SDK on this side, so Switchyard runs the loop itself (`packages/engine/src/agents/gemini.ts`): call the model, run the tools it asks for, hand back the results, repeat. The tools (`tools.ts`) are read, list, search, write, edit and run a command. File tools can't leave the ticket's worktree, and commands never see your API keys.
+- **Spend:** counted from each call's token usage times the price table in `gemini.ts` (`GEMINI_PRICES`, from Google's pricing page, November 2026; thinking tokens bill as output). Update the table when prices change, since the CFO's budgets depend on it. Unknown models are priced at the top rate so spend is never under-counted.
+- **Rate limits:** on a 429 or 503 the agent waits and retries up to three times. Free-tier keys have low limits, so several engineers in parallel may be slow; use 1 engineer per area or add billing.
 
 From the terminal, with gates prompted in the shell:
 
@@ -134,8 +145,8 @@ apps/web/              Next.js dashboard
 | GET | `/api/state` | |
 | GET | `/api/events` | SSE: `snapshot`, then `board` events |
 | GET | `/api/config` | key status (last 4 only), models |
-| PUT | `/api/config/key` | `{ key }` |
-| DELETE | `/api/config/key` | |
+| PUT | `/api/config/key` | `{ provider: "anthropic" \| "gemini", key }` |
+| DELETE | `/api/config/key?provider=gemini` | |
 | POST | `/api/projects` | `{ idea, continueFrom?, runner?, engineersPerArea?, floaters?, budgetUsd?, model?, models?, marketing?, design? }` |
 | POST | `/api/gates/:id/approve` | `{ feedback? }` |
 | POST | `/api/gates/:id/reject` | `{ feedback }` |

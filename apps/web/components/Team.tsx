@@ -2,27 +2,30 @@
 
 import { useEffect, useState } from "react";
 import type { Agent, Area, Project } from "@agentco/engine";
-import { api, type ModelOption, type ModelRole } from "@/lib/api";
+import { api, type ModelOption, type ModelRole, type ProviderStatus } from "@/lib/api";
+import { ModelOptions } from "@/components/StartForm";
 
 const STANDING: Record<string, string> = { trusted: "Trusted", watch: "On watch", benched: "Benched" };
 
-/** "claude-sonnet-5-5" → "Sonnet". */
+/** "claude-sonnet-5-5" → "Sonnet"; "gemini-3.5-flash" → "Gemini 3.5 Flash". */
 function modelLabel(id?: string): string | null {
-  const word = id?.replace(/^claude-/, "").split("-")[0];
-  return word ? word[0]!.toUpperCase() + word.slice(1) : null;
+  if (!id) return null;
+  const words = id.replace(/-preview$/, "").split("-");
+  const cap = (w: string) => w[0]!.toUpperCase() + w.slice(1);
+  return id.startsWith("claude-") ? cap(words[1] ?? "claude") : words.map(cap).join(" ");
 }
 
 /** Switch any role's model mid-run; tasks already running finish on their current model. */
 function ModelsEditor({ project }: { project: Project }) {
   const [open, setOpen] = useState(false);
-  const [options, setOptions] = useState<{ models: ModelOption[]; roles: ModelRole[] } | null>(null);
+  const [options, setOptions] = useState<{ models: ModelOption[]; roles: ModelRole[]; providers: ProviderStatus[] } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open || options) return;
     api
       .config()
-      .then((c) => setOptions({ models: c.models, roles: c.modelRoles }))
+      .then((c) => setOptions({ models: c.models, roles: c.modelRoles, providers: c.providers }))
       .catch(() => setError("Couldn't load the models."));
   }, [open, options]);
 
@@ -39,11 +42,7 @@ function ModelsEditor({ project }: { project: Project }) {
               api.setModels({ [r.role]: e.target.value }).catch((err: Error) => setError(err.message));
             }}
           >
-            {options.models.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.label}
-              </option>
-            ))}
+            <ModelOptions models={options.models} providers={options.providers} />
           </select>
         </label>
       ))}

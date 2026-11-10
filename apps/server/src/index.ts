@@ -10,14 +10,16 @@ import { streamSSE } from "hono/streaming";
 import { z } from "zod";
 import {
   Board,
-  ClaudeRunner,
   MockRunner,
   Orchestrator,
   ProjectRepo,
+  RoutedRunner,
+  providerOf,
   readHistory,
   summarizeHistory,
   type AgentRunner,
   type BoardEvent,
+  type Provider,
   type Role,
 } from "@agentco/engine";
 
@@ -37,18 +39,32 @@ const board = new Board();
 let orch: Orchestrator | null = null;
 let runnerName: string = DEFAULT_RUNNER;
 
-/** Models offered in the UI, cheapest first. */
-const MODELS = [
-  { id: "claude-haiku-5-5", label: "Haiku 5.5", hint: "Cheapest. Good for testing the flow." },
-  { id: "claude-sonnet-5-5", label: "Sonnet 5.5", hint: "Balanced cost and quality." },
-  { id: "claude-opus-5-5", label: "Opus 5.5", hint: "Most capable. Costs the most." },
-] as const;
+/** Models offered in the UI: each provider's, cheapest first. */
+const MODELS: { id: string; label: string; hint: string; provider: Provider }[] = [
+  { id: "claude-haiku-5-5", label: "Claude Haiku 5.5", hint: "Claude's cheapest. Good for testing the flow.", provider: "anthropic" },
+  { id: "claude-sonnet-5-5", label: "Claude Sonnet 5.5", hint: "Balanced cost and quality.", provider: "anthropic" },
+  { id: "claude-opus-5-5", label: "Claude Opus 5.5", hint: "Claude's most capable. Costs the most.", provider: "anthropic" },
+  { id: "gemini-3.1-flash-lite", label: "Gemini 3.1 Flash-Lite", hint: "Gemini's cheapest: $0.25 in / $1.50 out per million tokens.", provider: "gemini" },
+  { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash", hint: "Cheap and steady: $0.30 in / $2.50 out per million tokens.", provider: "gemini" },
+  { id: "gemini-3.5-flash", label: "Gemini 3.5 Flash", hint: "Fast and strong: $1.50 in / $9 out per million tokens.", provider: "gemini" },
+  { id: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro (preview)", hint: "Gemini's most capable: $2 in / $12 out per million tokens.", provider: "gemini" },
+];
+const PROVIDERS: { id: Provider; label: string; keyLabel: string; placeholder: string; help: string }[] = [
+  { id: "anthropic", label: "Claude", keyLabel: "Anthropic API key", placeholder: "sk-ant-...", help: "Create one at console.anthropic.com under API Keys." },
+  {
+    id: "gemini",
+    label: "Gemini",
+    keyLabel: "Gemini API key",
+    placeholder: "AIza...",
+    help: "Create one at aistudio.google.com/apikey. Free-tier keys work but have low rate limits; agents will wait and retry.",
+  },
+];
 const DEFAULT_MODEL = process.env.MODEL ?? "claude-haiku-5-5";
 
 /** Roles that run on a model, in the order the UI lists them. The CFO and dispatcher are plain code. */
 const MODEL_ROLES = ["pm", "marketing", "designer", "tech_lead", "task_creator", "engineer", "qa"] as const satisfies readonly Role[];
 const ModelsSchema = z
-  .record(z.enum(MODEL_ROLES), z.string())
+  .partialRecord(z.enum(MODEL_ROLES), z.string())
   .superRefine((m, ctx) => {
     for (const [role, id] of Object.entries(m)) {
       if (!MODELS.some((x) => x.id === id)) ctx.addIssue({ code: "custom", message: `Unknown model "${id}" for ${role}.` });
@@ -70,11 +86,22 @@ function fillModels(model: string, models: Models = {}): Models {
   return Object.fromEntries(MODEL_ROLES.map((r) => [r, models[r] ?? model]));
 }
 
-/** Escalated tickets (after repeated failures) run one tier above the engineers, and never below the tech lead. */
+/**
+ * Escalated tickets (after repeated failures) run one tier above the
+ * engineers, within the engineers' provider, and never below the tech lead
+ * when the tech lead is on that provider too.
+ */
 function escalationFor(models: Models): string {
-  const tier = (id?: string) => Math.max(0, MODELS.findIndex((m) => m.id === id));
-  const t = Math.max(Math.min(tier(models.engineer) + 1, MODELS.length - 1), tier(models.tech_lead));
-  return MODELS[t]!.id;
+  const provider = providerOf(models.engineer ?? DEFAULT_MODEL);
+  const ladder = MODELS.filter((m) => m.provider === provider);
+  const tier = (id?: string) => Math.max(0, ladder.findIndex((m) => m.id === id));
+  const lead = models.tech_lead && providerOf(models.tech_lead) === provider ? tier(models.tech_lead) : 0;
+  return ladder[Math.max(Math.min(tier(models.engineer) + 1, ladder.length - 1), lead)]!.id;
+}
+
+/** The providers a set of models needs keys for. */
+function providersOf(models: Models): Provider[] {
+  return [...new Set([...Object.values(models), escalationFor(models)].map((m) => providerOf(m!)))];
 }
 
 /**
@@ -82,17 +109,53 @@ function escalationFor(models: Models): string {
  * never logged, never returned to the browser beyond its last 4 characters.
  * A key from the environment is used unless the UI sets one.
  */
-let uiKey: string | undefined;
-const envKey = process.env.ANTHROPIC_API_KEY || undefined;
-const currentKey = () => uiKey ?? envKey;
+const uiKeys: Partial<Record<Provider, string>> = {};
+const envKeys: Partial<Record<Provider, string>> = {
+  anthropic: process.env.ANTHROPIC_API_KEY || undefined,
+  gemini: process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || undefined,
+};
+const currentKey = (p: Provider) => uiKeys[p] ?? envKeys[p];
+/** Tells a running company about a key added or replaced mid-run. */
+let routed: RoutedRunner | null = null;
 
 function keyStatus() {
-  const key = currentKey();
   return {
-    hasKey: !!key,
-    keySource: uiKey ? "ui" : envKey ? "env" : null,
-    keyHint: key ? key.slice(-4) : null,
+    providers: PROVIDERS.map((p) => {
+      const key = currentKey(p.id);
+      return {
+        ...p,
+        hasKey: !!key,
+        keySource: uiKeys[p.id] ? ("ui" as const) : envKeys[p.id] ? ("env" as const) : null,
+        keyHint: key ? key.slice(-4) : null,
+      };
+    }),
   };
+}
+
+const KEY_SHAPE: Record<Provider, { test: (k: string) => boolean; message: string }> = {
+  anthropic: { test: (k) => /^sk-ant-[A-Za-z0-9_-]{20,}$/.test(k), message: "That doesn't look like an Anthropic API key (sk-ant-...)." },
+  gemini: {
+    test: (k) => /^[A-Za-z0-9._-]{30,}$/.test(k) && !k.startsWith("sk-"),
+    message: "That doesn't look like a Gemini API key (they usually start with AIza). Create one at aistudio.google.com/apikey.",
+  },
+};
+
+/**
+ * Ask Google whether a Gemini key works, with a free call that lists one
+ * model. "invalid" means Google rejected it; "unverified" means we couldn't
+ * reach Google to ask, so the key is kept and the first agent call decides.
+ */
+async function checkGeminiKey(key: string): Promise<"ok" | "invalid" | "unverified"> {
+  try {
+    const res = await fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=1", {
+      headers: { "x-goog-api-key": key },
+      signal: AbortSignal.timeout(6000),
+    });
+    if (res.ok) return "ok";
+    return res.status === 400 || res.status === 401 || res.status === 403 ? "invalid" : "unverified";
+  } catch {
+    return "unverified";
+  }
 }
 
 const StartSchema = z.object({
@@ -123,13 +186,24 @@ function makeRunner(kind: "mock" | "claude", models: Models, budgetUsd: number):
   }
   // Cap any single task at a quarter of the budget (min $0.50), so one
   // runaway agent can't blow through it before the CFO gate trips.
-  return new ClaudeRunner({
-    model: models.engineer,
+  routed = new RoutedRunner({
+    model: models.engineer ?? DEFAULT_MODEL,
     models,
     escalationModel: escalationFor(models),
-    apiKey: currentKey(),
+    anthropicKey: currentKey("anthropic"),
+    geminiKey: currentKey("gemini"),
     maxBudgetUsdPerTask: Math.max(0.5, budgetUsd / 4),
   });
+  return routed;
+}
+
+/** An error naming the first provider these models need a key for, if any is missing. */
+function missingKey(models: Models): string | null {
+  const p = providersOf(models).find((id) => !currentKey(id));
+  if (!p) return null;
+  const info = PROVIDERS.find((x) => x.id === p)!;
+  const roles = MODEL_ROLE_INFO.filter((r) => models[r.role] && providerOf(models[r.role]!) === p).map((r) => r.label);
+  return `Add your ${info.keyLabel}: ${roles.length ? `${roles.join(", ")} ${roles.length === 1 ? "is" : "are"} set to a ${info.label} model` : `escalated tickets use a ${info.label} model`}.`;
 }
 
 const app = new Hono();
@@ -146,16 +220,25 @@ app.get("/api/config", (c) =>
   c.json({ ...keyStatus(), models: MODELS, modelRoles: MODEL_ROLE_INFO, defaultModel: DEFAULT_MODEL, defaultRunner: DEFAULT_RUNNER }),
 );
 
+const ProviderSchema = z.enum(["anthropic", "gemini"]).default("anthropic");
+
 app.put("/api/config/key", async (c) => {
-  const { key } = z
-    .object({ key: z.string().trim().regex(/^sk-ant-[A-Za-z0-9_-]{20,}$/, "That doesn't look like an Anthropic API key (sk-ant-...).") })
-    .parse(await c.req.json());
-  uiKey = key;
-  return c.json(keyStatus());
+  const { key, provider } = z.object({ key: z.string().trim(), provider: ProviderSchema }).parse(await c.req.json());
+  if (!KEY_SHAPE[provider].test(key)) return c.json({ error: KEY_SHAPE[provider].message }, 400);
+  let verified: boolean | undefined;
+  if (provider === "gemini") {
+    const check = await checkGeminiKey(key);
+    if (check === "invalid") return c.json({ error: "Google rejected that Gemini API key. Check it was copied in full and is enabled for the Gemini API." }, 400);
+    verified = check === "ok";
+  }
+  uiKeys[provider] = key;
+  routed?.setKeys({ anthropicKey: currentKey("anthropic"), geminiKey: currentKey("gemini") });
+  return c.json({ ...keyStatus(), verified });
 });
 
 app.delete("/api/config/key", (c) => {
-  uiKey = undefined;
+  const provider = ProviderSchema.parse(c.req.query("provider"));
+  delete uiKeys[provider];
   return c.json(keyStatus());
 });
 
@@ -242,12 +325,11 @@ app.post("/api/projects", async (c) => {
     return c.json({ error: stopping ? "The last project is still stopping. Try again in a few seconds." : "A project is already running. Stop it first." }, 409);
   }
   const kind = body.runner ?? DEFAULT_RUNNER;
-  if (kind === "claude" && !currentKey()) {
-    return c.json({ error: "Add your Anthropic API key to use Claude agents." }, 400);
-  }
   const model = body.model ?? DEFAULT_MODEL;
-  if (kind === "claude" && !MODELS.some((m) => m.id === model)) {
-    return c.json({ error: `Unknown model "${model}".` }, 400);
+  if (kind === "claude") {
+    if (!MODELS.some((m) => m.id === model)) return c.json({ error: `Unknown model "${model}".` }, 400);
+    const missing = missingKey(fillModels(model, body.models));
+    if (missing) return c.json({ error: missing }, 400);
   }
   let existingDir: string | undefined;
   if (body.continueFrom) {
@@ -333,6 +415,8 @@ app.put("/api/models", async (c) => {
   const { models } = z.object({ models: ModelsSchema }).parse(await c.req.json());
   if (runnerName !== "claude") return c.json({ error: "Demo agents don't use models." }, 400);
   const all = fillModels(DEFAULT_MODEL, { ...board.project?.models, ...models });
+  const missing = missingKey(all);
+  if (missing) return c.json({ error: missing }, 400);
   requireOrch().setModels(all, escalationFor(all));
   return c.json({ models: all });
 });
@@ -357,7 +441,8 @@ app.post("/api/stop", (c) => {
 serve({ fetch: app.fetch, port: PORT }, () => {
   console.log(`Agent Company server on http://localhost:${PORT}`);
   console.log(`  runner: ${DEFAULT_RUNNER} (set RUNNER=claude for real agents)`);
-  console.log(`  API key: ${envKey ? "from ANTHROPIC_API_KEY" : "not set (add it in the UI)"}`);
+  console.log(`  Anthropic key: ${envKeys.anthropic ? "from ANTHROPIC_API_KEY" : "not set (add it in the UI)"}`);
+  console.log(`  Gemini key: ${envKeys.gemini ? "from GEMINI_API_KEY" : "not set (add it in the UI)"}`);
   console.log(`  workspace: ${WORKSPACE}`);
   if (ICLOUD_HINT) {
     console.warn(

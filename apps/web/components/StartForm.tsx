@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { api, type Product, type ServerConfig } from "@/lib/api";
+import { api, type ModelOption, type Product, type ProviderId, type ServerConfig } from "@/lib/api";
 import { svgUrl } from "@/components/Header";
 
 const LAST_PHASE: Record<string, string> = {
@@ -10,6 +10,25 @@ const LAST_PHASE: Record<string, string> = {
   failed: "Stopped on a failure",
   releasing: "Waiting on the release card",
 };
+
+/** Model choices grouped by provider, for a <select>. */
+export function ModelOptions({ models, providers }: { models: ModelOption[]; providers: { id: ProviderId; label: string }[] }) {
+  return (
+    <>
+      {providers.map((p) => (
+        <optgroup key={p.id} label={p.label}>
+          {models
+            .filter((m) => m.provider === p.id)
+            .map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.label}
+              </option>
+            ))}
+        </optgroup>
+      ))}
+    </>
+  );
+}
 
 /** Where the product's last run left off: the reference while you write the next request. */
 function LastRun({ product, onUseBrief }: { product: Product; onUseBrief: (brief: string) => void }) {
@@ -95,14 +114,15 @@ export function StartForm({ onCancel }: { onCancel?: () => void }) {
   const [model, setModel] = useState("");
   /** Per-role overrides; a role left out uses the default model. */
   const [roleModels, setRoleModels] = useState<Record<string, string>>({});
-  const [keyInput, setKeyInput] = useState("");
-  const [replacingKey, setReplacingKey] = useState(false);
+  const [keyInputs, setKeyInputs] = useState<Partial<Record<ProviderId, string>>>({});
+  const [replacingKey, setReplacingKey] = useState<Partial<Record<ProviderId, boolean>>>({});
+  const [keyNote, setKeyNote] = useState<string | null>(null);
   const [engineers, setEngineers] = useState(1);
   const [floaters, setFloaters] = useState(1);
   const [budget, setBudget] = useState(5);
   const [marketing, setMarketing] = useState(true);
   const [design, setDesign] = useState(true);
-  const [error, setError] = useState<{ field: "idea" | "key" | "budget" | "form"; message: string } | null>(null);
+  const [error, setError] = useState<{ field: "idea" | "key" | "budget" | "form"; message: string; provider?: ProviderId } | null>(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -127,7 +147,13 @@ export function StartForm({ onCancel }: { onCancel?: () => void }) {
   const continuing = mode === "continue";
 
   const claude = runner === "claude";
-  const showKeyInput = claude && (!config?.hasKey || replacingKey);
+  // Which providers the chosen models need: every role's model, or the default where a role has none.
+  const providerOfModel = (id: string) => config?.models.find((m) => m.id === id)?.provider;
+  const needed = new Set(
+    (config?.modelRoles ?? []).map((r) => providerOfModel(roleModels[r.role] ?? model)).filter((x): x is ProviderId => !!x),
+  );
+  const providers = config?.providers ?? [];
+  const showsInput = (id: ProviderId) => !providers.find((p) => p.id === id)?.hasKey || !!replacingKey[id];
   const selectedModel = config?.models.find((m) => m.id === model);
   const chosen = continuing ? products?.find((p) => p.dir === product) : undefined;
   const unfinishedCount = chosen?.last?.counts.open ?? 0;
@@ -141,19 +167,26 @@ export function StartForm({ onCancel }: { onCancel?: () => void }) {
         message: continuing ? "Describe what should change first." : "Describe the product in a sentence or two first.",
       });
     if (!(budget > 0)) return setError({ field: "budget", message: "Set a budget above $0." });
-    if (showKeyInput && !keyInput.trim()) return setError({ field: "key", message: "Paste your Anthropic API key to use Claude agents." });
+    const toSave = claude ? providers.filter((p) => showsInput(p.id) && keyInputs[p.id]?.trim()) : [];
+    if (claude) {
+      const missing = providers.find((p) => needed.has(p.id) && showsInput(p.id) && !keyInputs[p.id]?.trim());
+      if (missing) {
+        return setError({ field: "key", provider: missing.id, message: `Paste your ${missing.keyLabel}: some agents are set to a ${missing.label} model.` });
+      }
+    }
 
     setBusy(true);
     setError(null);
     try {
-      if (showKeyInput) {
+      for (const p of toSave) {
         try {
-          const status = await api.setKey(keyInput.trim());
-          setConfig((c) => (c ? { ...c, ...status } : c));
-          setKeyInput("");
-          setReplacingKey(false);
+          const status = await api.setKey(p.id, keyInputs[p.id]!.trim());
+          setConfig((c) => (c ? { ...c, providers: status.providers } : c));
+          setKeyInputs((k) => ({ ...k, [p.id]: "" }));
+          setReplacingKey((r) => ({ ...r, [p.id]: false }));
+          if (status.verified === false) setKeyNote(`Couldn't reach Google to check the ${p.label} key; it's saved and the first agent call will tell.`);
         } catch (err) {
-          setError({ field: "key", message: (err as Error).message });
+          setError({ field: "key", provider: p.id, message: (err as Error).message });
           return;
         }
       }
@@ -178,10 +211,10 @@ export function StartForm({ onCancel }: { onCancel?: () => void }) {
     }
   }
 
-  async function removeKey() {
-    const status = await api.clearKey();
-    setConfig((c) => (c ? { ...c, ...status } : c));
-    setReplacingKey(false);
+  async function removeKey(id: ProviderId) {
+    const status = await api.clearKey(id);
+    setConfig((c) => (c ? { ...c, providers: status.providers } : c));
+    setReplacingKey((r) => ({ ...r, [id]: false }));
   }
 
   const fieldError = (field: "idea" | "key" | "budget") =>
@@ -257,67 +290,66 @@ export function StartForm({ onCancel }: { onCancel?: () => void }) {
           </label>
           <label>
             <input type="radio" name="runner" checked={runner === "claude"} onChange={() => setRunner("claude")} />
-            Claude agents
-            <span className="hint">Real work in real code. Billed to your Anthropic API key.</span>
+            Real agents
+            <span className="hint">Claude or Gemini models doing real work in real code. Billed to your own API keys.</span>
           </label>
         </div>
 
         {claude && (
           <fieldset className="claude-settings">
-            <legend>Claude agents</legend>
+            <legend>Real agents</legend>
 
-            {showKeyInput ? (
-              <label>
-                Anthropic API key
-                <input
-                  type="password"
-                  autoComplete="off"
-                  spellCheck={false}
-                  placeholder="sk-ant-api..."
-                  value={keyInput}
-                  onChange={(e) => {
-                    setKeyInput(e.target.value);
-                    if (error?.field === "key") setError(null);
-                  }}
-                />
-                <span className="hint">
-                  Create one at console.anthropic.com under API Keys. It stays in the server's memory only and is
-                  cleared when the server stops.
-                </span>
-                {fieldError("key")}
-                {replacingKey && (
-                  <button type="button" className="btn btn-quiet link" onClick={() => setReplacingKey(false)}>
-                    Keep the current key
-                  </button>
-                )}
-              </label>
-            ) : (
-              <div className="key-status">
-                <span>
-                  Using your API key ending in <strong>{config?.keyHint}</strong>
-                  {config?.keySource === "env" ? " from the server's environment" : ""}.
-                </span>
-                <span className="key-actions">
-                  <button type="button" className="btn btn-quiet link" onClick={() => setReplacingKey(true)}>
-                    Use a different key
-                  </button>
-                  {config?.keySource === "ui" && (
-                    <button type="button" className="btn btn-quiet link" onClick={removeKey}>
-                      Remove key
+            {providers.map((p) => {
+              const inUse = needed.has(p.id);
+              const keyError = error?.field === "key" && error.provider === p.id ? <span className="field-error">{error.message}</span> : null;
+              return showsInput(p.id) ? (
+                <label key={p.id}>
+                  {p.keyLabel}
+                  {!inUse && <span className="hint"> · optional: no agent is set to a {p.label} model</span>}
+                  <input
+                    type="password"
+                    autoComplete="off"
+                    spellCheck={false}
+                    placeholder={p.placeholder}
+                    value={keyInputs[p.id] ?? ""}
+                    onChange={(e) => {
+                      setKeyInputs((k) => ({ ...k, [p.id]: e.target.value }));
+                      if (error?.field === "key") setError(null);
+                    }}
+                  />
+                  <span className="hint">{p.help} It stays in the server's memory only and is cleared when the server stops.</span>
+                  {keyError}
+                  {replacingKey[p.id] && (
+                    <button type="button" className="btn btn-quiet link" onClick={() => setReplacingKey((r) => ({ ...r, [p.id]: false }))}>
+                      Keep the current key
                     </button>
                   )}
-                </span>
-              </div>
-            )}
+                </label>
+              ) : (
+                <div className="key-status" key={p.id}>
+                  <span>
+                    {p.label}: using your key ending in <strong>{p.keyHint}</strong>
+                    {p.keySource === "env" ? " from the server's environment" : ""}.
+                  </span>
+                  <span className="key-actions">
+                    <button type="button" className="btn btn-quiet link" onClick={() => setReplacingKey((r) => ({ ...r, [p.id]: true }))}>
+                      Use a different key
+                    </button>
+                    {p.keySource === "ui" && (
+                      <button type="button" className="btn btn-quiet link" onClick={() => void removeKey(p.id)}>
+                        Remove key
+                      </button>
+                    )}
+                  </span>
+                </div>
+              );
+            })}
+            {keyNote && <p className="hint">{keyNote}</p>}
 
             <label>
               Default model
               <select value={model} onChange={(e) => setModel(e.target.value)}>
-                {config?.models.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.label}
-                  </option>
-                ))}
+                {config && <ModelOptions models={config.models} providers={config.providers} />}
               </select>
               {selectedModel && <span className="hint">{selectedModel.hint}</span>}
             </label>
@@ -329,7 +361,7 @@ export function StartForm({ onCancel }: { onCancel?: () => void }) {
               </summary>
               <p className="hint">
                 Design, branding and reviews need taste; engineers are most of the spend. A common setup: Sonnet or Opus
-                for the designer and marketing, Haiku for engineers. You can change these during the run too.
+                for the designer and marketing, Haiku or a Gemini Flash model for engineers. You can mix Claude and Gemini. You can change these during the run too.
               </p>
               <div className="role-grid">
                 {config?.modelRoles.map((r) => (
@@ -347,11 +379,7 @@ export function StartForm({ onCancel }: { onCancel?: () => void }) {
                       }
                     >
                       <option value="">Default ({config.models.find((m) => m.id === model)?.label ?? "default"})</option>
-                      {config.models.map((m) => (
-                        <option key={m.id} value={m.id}>
-                          {m.label}
-                        </option>
-                      ))}
+                      <ModelOptions models={config.models} providers={config.providers} />
                     </select>
                     <span className="hint">{r.hint}</span>
                   </label>

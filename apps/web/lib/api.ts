@@ -31,6 +31,7 @@ export interface StartOptions {
   continueFrom?: string;
   /** Pick up the last run's unfinished tickets; no new request needed. */
   resume?: boolean;
+  /** "claude" means real agents: Claude or Gemini, by each role's model. */
   runner: "mock" | "claude";
   engineersPerArea: number;
   floaters: number;
@@ -48,16 +49,31 @@ export interface ModelRole {
   hint: string;
 }
 
+export type ProviderId = "anthropic" | "gemini";
+
 export interface ModelOption {
   id: string;
   label: string;
   hint: string;
+  provider: ProviderId;
 }
 
-export interface KeyStatus {
+/** One model provider and the state of its API key (never the key itself). */
+export interface ProviderStatus {
+  id: ProviderId;
+  label: string;
+  keyLabel: string;
+  placeholder: string;
+  help: string;
   hasKey: boolean;
   keySource: "ui" | "env" | null;
   keyHint: string | null;
+}
+
+export interface KeyStatus {
+  providers: ProviderStatus[];
+  /** Gemini only: false when Google couldn't be reached to check the key. */
+  verified?: boolean;
 }
 
 export interface ServerConfig extends KeyStatus {
@@ -70,8 +86,8 @@ export interface ServerConfig extends KeyStatus {
 export const api = {
   config: () => request<ServerConfig>("GET", "/api/config"),
   products: () => request<{ products: Product[]; workspace: string }>("GET", "/api/products"),
-  setKey: (key: string) => request<KeyStatus>("PUT", "/api/config/key", { key }),
-  clearKey: () => request<KeyStatus>("DELETE", "/api/config/key"),
+  setKey: (provider: ProviderId, key: string) => request<KeyStatus>("PUT", "/api/config/key", { provider, key }),
+  clearKey: (provider: ProviderId) => request<KeyStatus>("DELETE", `/api/config/key?provider=${provider}`),
   start: (opts: StartOptions) => post("/api/projects", opts),
   approve: (gateId: string, feedback?: string) => post(`/api/gates/${gateId}/approve`, feedback ? { feedback } : {}),
   reject: (gateId: string, feedback?: string) => post(`/api/gates/${gateId}/reject`, feedback ? { feedback } : {}),

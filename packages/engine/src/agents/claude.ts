@@ -41,7 +41,12 @@ export class ClaudeRunner implements AgentRunner {
     return task.escalated ? (this.options.escalationModel ?? own) : own;
   }
 
-  async run(task: AgentTask, onActivity: ActivityListener, signal?: AbortSignal): Promise<AgentResult> {
+  run(task: AgentTask, onActivity: ActivityListener, signal?: AbortSignal): Promise<AgentResult> {
+    return this.runModel(this.modelFor(task), task, onActivity, signal);
+  }
+
+  /** Run a task on a given model (the router picks it per role). */
+  async runModel(model: string | undefined, task: AgentTask, onActivity: ActivityListener, signal?: AbortSignal): Promise<AgentResult> {
     const tools = task.canWrite ? WRITE_TOOLS : READ_TOOLS;
     const abortController = new AbortController();
     signal?.addEventListener("abort", () => abortController.abort(), { once: true });
@@ -54,7 +59,7 @@ export class ClaudeRunner implements AgentRunner {
         options: {
           cwd: task.cwd,
           systemPrompt: task.systemPrompt,
-          model: this.modelFor(task),
+          model,
           maxTurns: task.maxTurns ?? (task.canWrite ? 40 : 12),
           maxBudgetUsd: capOf(task.budgetUsd, this.options.maxBudgetUsdPerTask),
           tools,

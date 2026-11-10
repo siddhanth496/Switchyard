@@ -95,7 +95,8 @@ const GROUPS: { title: string; note?: string; roles: Agent["role"][] }[] = [
 export function Team({ agents, areas, project }: { agents: Agent[]; areas: Area[]; project: Project }) {
   const floaters = agents.filter((a) => a.role === "engineer" && !a.area);
   const modelOf = (a: Agent) => modelLabel(project.models?.[a.role]);
-  const live = !["shipped", "failed", "stopped"].includes(project.phase);
+  // Still shown after a failure: switching a model is often the fix before trying again.
+  const live = !["shipped", "stopped"].includes(project.phase);
   return (
     <aside className="team" aria-label="Team">
       {project.models && live && <ModelsEditor project={project} />}

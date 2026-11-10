@@ -179,16 +179,7 @@ export function StartForm({ onCancel }: { onCancel?: () => void }) {
     setError(null);
     try {
       for (const p of toSave) {
-        try {
-          const status = await api.setKey(p.id, keyInputs[p.id]!.trim());
-          setConfig((c) => (c ? { ...c, providers: status.providers } : c));
-          setKeyInputs((k) => ({ ...k, [p.id]: "" }));
-          setReplacingKey((r) => ({ ...r, [p.id]: false }));
-          if (status.verified === false) setKeyNote(`Couldn't reach Google to check the ${p.label} key; it's saved and the first agent call will tell.`);
-        } catch (err) {
-          setError({ field: "key", provider: p.id, message: (err as Error).message });
-          return;
-        }
+        if (!(await saveKey(p.id))) return;
       }
       await api.start({
         idea: resume ? "" : idea.trim(),
@@ -208,6 +199,36 @@ export function StartForm({ onCancel }: { onCancel?: () => void }) {
       setError({ field: "form", message: (err as Error).message });
     } finally {
       setBusy(false);
+    }
+  }
+
+  /** Save one key now, so the model lists show what that key can really use. */
+  async function saveKey(id: ProviderId): Promise<boolean> {
+    const p = providers.find((x) => x.id === id)!;
+    try {
+      const status = await api.setKey(id, (keyInputs[id] ?? "").trim());
+      const models = status.models;
+      setConfig((c) => (c ? { ...c, providers: status.providers, models: models ?? c.models, geminiListed: id === "gemini" ? status.verified === true : c.geminiListed } : c));
+      setKeyInputs((k) => ({ ...k, [id]: "" }));
+      setReplacingKey((r) => ({ ...r, [id]: false }));
+      setError(null);
+      if (models) {
+        // Drop choices the key can't use.
+        const ok = (m: string) => models.some((x) => x.id === m);
+        setRoleModels((r) => Object.fromEntries(Object.entries(r).filter(([, m]) => ok(m))));
+        setModel((m) => (ok(m) ? m : (models.find((x) => x.provider === providerOfModel(m))?.id ?? models[0]!.id)));
+      }
+      setKeyNote(
+        status.verified === false
+          ? `Couldn't reach Google to check the ${p.label} key or load its models. It's saved; the models listed are a guess and the first agent call will tell.`
+          : id === "gemini"
+            ? `Gemini key checked. The model lists now show the ${models?.filter((m) => m.provider === "gemini").length ?? 0} Gemini models this key can use.`
+            : null,
+      );
+      return true;
+    } catch (err) {
+      setError({ field: "key", provider: id, message: (err as Error).message });
+      return false;
     }
   }
 
@@ -319,6 +340,9 @@ export function StartForm({ onCancel }: { onCancel?: () => void }) {
                   />
                   <span className="hint">{p.help} It stays in the server's memory only and is cleared when the server stops.</span>
                   {keyError}
+                  <button type="button" className="btn link" disabled={!keyInputs[p.id]?.trim()} onClick={() => void saveKey(p.id)}>
+                    {p.id === "gemini" ? "Check key and load its models" : "Save key"}
+                  </button>
                   {replacingKey[p.id] && (
                     <button type="button" className="btn btn-quiet link" onClick={() => setReplacingKey((r) => ({ ...r, [p.id]: false }))}>
                       Keep the current key
@@ -345,6 +369,12 @@ export function StartForm({ onCancel }: { onCancel?: () => void }) {
               );
             })}
             {keyNote && <p className="hint">{keyNote}</p>}
+            {needed.has("gemini") && config && !config.geminiListed && !keyNote && (
+              <p className="hint">
+                The Gemini models listed are a guess until your key is checked. Google offers different models to different
+                accounts, so use "Check key and load its models" before you pick.
+              </p>
+            )}
 
             <label>
               Default model

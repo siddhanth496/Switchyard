@@ -74,10 +74,14 @@ export interface KeyStatus {
   providers: ProviderStatus[];
   /** Gemini only: false when Google couldn't be reached to check the key. */
   verified?: boolean;
+  /** After saving a key: the models now on offer. */
+  models?: ModelOption[];
 }
 
 export interface ServerConfig extends KeyStatus {
   models: ModelOption[];
+  /** False while the Gemini models shown are a guess, not what the key can really use. */
+  geminiListed: boolean;
   modelRoles: ModelRole[];
   defaultModel: string;
   defaultRunner: "mock" | "claude";
@@ -94,6 +98,7 @@ export const api = {
   retry: (ticketId: string, guidance?: string) => post(`/api/tickets/${ticketId}/retry`, guidance ? { guidance } : {}),
   skip: (ticketId: string) => post(`/api/tickets/${ticketId}/skip`),
   stop: () => post("/api/stop"),
+  retryRun: () => post("/api/retry"),
   pause: () => post("/api/pause"),
   resume: () => post("/api/resume"),
   requestChange: (request: string) => post("/api/changes", { request }),

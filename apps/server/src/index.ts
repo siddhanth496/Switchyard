@@ -13,6 +13,7 @@ import {
   MockRunner,
   Orchestrator,
   ProjectRepo,
+  GEMINI_PRICES,
   RoutedRunner,
   providerOf,
   readHistory,
@@ -39,8 +40,13 @@ const board = new Board();
 let orch: Orchestrator | null = null;
 let runnerName: string = DEFAULT_RUNNER;
 
-/** Models offered in the UI: each provider's, cheapest first. */
-const MODELS: { id: string; label: string; hint: string; provider: Provider }[] = [
+type ModelInfo = { id: string; label: string; hint: string; provider: Provider };
+/**
+ * Models offered in the UI: each provider's, cheapest first. The Gemini
+ * entries are only a fallback: once a Gemini key is set, the list is
+ * replaced by the models Google says that key can use (see loadGeminiModels).
+ */
+let MODELS: ModelInfo[] = [
   { id: "claude-haiku-5-5", label: "Claude Haiku 5.5", hint: "Claude's cheapest. Good for testing the flow.", provider: "anthropic" },
   { id: "claude-sonnet-5-5", label: "Claude Sonnet 5.5", hint: "Balanced cost and quality.", provider: "anthropic" },
   { id: "claude-opus-5-5", label: "Claude Opus 5.5", hint: "Claude's most capable. Costs the most.", provider: "anthropic" },
@@ -140,23 +146,68 @@ const KEY_SHAPE: Record<Provider, { test: (k: string) => boolean; message: strin
   },
 };
 
+const GEMINI_API_BASE = process.env.GEMINI_API_BASE ?? "https://generativelanguage.googleapis.com";
+const CLAUDE_MODELS = MODELS.filter((m) => m.provider === "anthropic");
+const FALLBACK_GEMINI = MODELS.filter((m) => m.provider === "gemini");
+/** True once the Gemini list came from Google for the current key. */
+let geminiListed = false;
+
+/** Gemini models that aren't for agent work: other media, live audio, special-purpose. */
+const NOT_FOR_AGENTS = /image|tts|audio|live|embedding|robotics|computer-use|customtools|aqa|learnlm|imagen|veo|lyria|gemma/;
+
+function geminiHint(id: string): string {
+  const price = GEMINI_PRICES[id];
+  return price
+    ? `$${price.in} in / $${price.out} out per million tokens.`
+    : "Price not in Switchyard's table yet, so spend is counted at a high rate ($4 in / $18 out per million). Check Google's pricing page.";
+}
+
 /**
- * Ask Google whether a Gemini key works, with a free call that lists one
- * model. "invalid" means Google rejected it; "unverified" means we couldn't
- * reach Google to ask, so the key is kept and the first agent call decides.
+ * Ask Google which models this key can use (a free call), and offer exactly
+ * those: model ids change often and differ by account, so a fixed list goes
+ * stale. "invalid" means Google rejected the key; "unverified" means Google
+ * couldn't be reached, so the key is kept and the fallback list is shown.
  */
-async function checkGeminiKey(key: string): Promise<"ok" | "invalid" | "unverified"> {
+async function loadGeminiModels(key: string): Promise<"ok" | "invalid" | "unverified"> {
   try {
-    const res = await fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=1", {
-      headers: { "x-goog-api-key": key },
-      signal: AbortSignal.timeout(6000),
-    });
-    if (res.ok) return "ok";
-    return res.status === 400 || res.status === 401 || res.status === 403 ? "invalid" : "unverified";
+    const found: ModelInfo[] = [];
+    let pageToken = "";
+    do {
+      const res = await fetch(`${GEMINI_API_BASE}/v1beta/models?pageSize=200${pageToken ? `&pageToken=${pageToken}` : ""}`, {
+        headers: { "x-goog-api-key": key },
+        signal: AbortSignal.timeout(8000),
+      });
+      if (!res.ok) return res.status === 400 || res.status === 401 || res.status === 403 ? "invalid" : "unverified";
+      const page = (await res.json()) as {
+        models?: { name: string; displayName?: string; supportedGenerationMethods?: string[] }[];
+        nextPageToken?: string;
+      };
+      for (const m of page.models ?? []) {
+        const id = m.name.replace(/^models\//, "");
+        if (!id.startsWith("gemini-") || NOT_FOR_AGENTS.test(id)) continue;
+        if (!m.supportedGenerationMethods?.includes("generateContent")) continue;
+        if (/-\d{3}$|-\d{2}-\d{2,4}$|-latest$/.test(id)) continue; // dated snapshots and aliases of models already listed
+        found.push({ id, label: m.displayName ?? id, hint: geminiHint(id), provider: "gemini" });
+      }
+      pageToken = page.nextPageToken ?? "";
+    } while (pageToken);
+    if (found.length === 0) return "unverified";
+    // Cheapest first; models without a known price last, by name.
+    const cost = (m: ModelInfo) => GEMINI_PRICES[m.id]?.out ?? Infinity;
+    found.sort((a, b) => cost(a) - cost(b) || a.id.localeCompare(b.id));
+    MODELS = [...CLAUDE_MODELS, ...found];
+    geminiListed = true;
+    return "ok";
   } catch {
     return "unverified";
   }
 }
+
+function forgetGeminiModels(): void {
+  MODELS = [...CLAUDE_MODELS, ...FALLBACK_GEMINI];
+  geminiListed = false;
+}
+if (envKeys.gemini) void loadGeminiModels(envKeys.gemini);
 
 const StartSchema = z.object({
   idea: z.string().trim().default(""),
@@ -217,7 +268,15 @@ app.onError((err, c) => {
 app.get("/api/health", (c) => c.json({ ok: true }));
 
 app.get("/api/config", (c) =>
-  c.json({ ...keyStatus(), models: MODELS, modelRoles: MODEL_ROLE_INFO, defaultModel: DEFAULT_MODEL, defaultRunner: DEFAULT_RUNNER }),
+  c.json({
+    ...keyStatus(),
+    models: MODELS,
+    /** False while the Gemini models shown are a guess, not what the key can really use. */
+    geminiListed,
+    modelRoles: MODEL_ROLE_INFO,
+    defaultModel: DEFAULT_MODEL,
+    defaultRunner: DEFAULT_RUNNER,
+  }),
 );
 
 const ProviderSchema = z.enum(["anthropic", "gemini"]).default("anthropic");
@@ -227,18 +286,23 @@ app.put("/api/config/key", async (c) => {
   if (!KEY_SHAPE[provider].test(key)) return c.json({ error: KEY_SHAPE[provider].message }, 400);
   let verified: boolean | undefined;
   if (provider === "gemini") {
-    const check = await checkGeminiKey(key);
+    const check = await loadGeminiModels(key);
+    if (check !== "ok") forgetGeminiModels();
     if (check === "invalid") return c.json({ error: "Google rejected that Gemini API key. Check it was copied in full and is enabled for the Gemini API." }, 400);
     verified = check === "ok";
   }
   uiKeys[provider] = key;
   routed?.setKeys({ anthropicKey: currentKey("anthropic"), geminiKey: currentKey("gemini") });
-  return c.json({ ...keyStatus(), verified });
+  return c.json({ ...keyStatus(), verified, models: MODELS });
 });
 
-app.delete("/api/config/key", (c) => {
+app.delete("/api/config/key", async (c) => {
   const provider = ProviderSchema.parse(c.req.query("provider"));
   delete uiKeys[provider];
+  if (provider === "gemini") {
+    forgetGeminiModels();
+    if (envKeys.gemini) await loadGeminiModels(envKeys.gemini);
+  }
   return c.json(keyStatus());
 });
 
@@ -432,6 +496,11 @@ app.post("/api/tickets/:id/note", async (c) => {
 });
 
 app.post("/api/tickets/:id/cancel", (c) => c.json(requireOrch().cancel(c.req.param("id"))));
+
+app.post("/api/retry", (c) => {
+  requireOrch().retryPlan();
+  return c.json({ ok: true });
+});
 
 app.post("/api/stop", (c) => {
   requireOrch().stop();

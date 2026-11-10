@@ -37,6 +37,7 @@ You aren't limited to the decision cards:
 
 - **Edit the brief** (the bar under the header, always showing the brief the team is working from): change the prompt at any point instead of going back to the start screen. Before the build, the step in progress stops and the PM rewrites the PRD from the new brief, and the plan restarts from there (an approved brand is kept). During the build, the task creator files tickets for whatever the new brief changes. While the release card is waiting, it holds the release.
 - **Pause / Resume** (header): running tickets finish, nothing new starts, and QA and the release wait, until you resume.
+- **Try again** (shown when a run fails during planning, e.g. an agent's model isn't available): fix the cause, such as switching that agent's model under *Models*, then press it. The run restarts at the step that failed and keeps the PRD and brand you approved.
 - **Stop** (header): stops at once. Running agents are aborted, waiting decision cards close, and tickets that were mid-build go back on the board with no attempt or penalty counted. Pick the product up later with *Continue a product*.
 - **Ask for a change** (the bar above the board): type a change at any point in the build. The task creator files tickets for it straight away, and they're built and tested before the release. While the release card is waiting, a change request holds the release with that feedback.
 - **Steer a ticket** (the *Steer* link on any waiting or running ticket):
@@ -88,8 +89,7 @@ When a key is set, agents always authenticate with it. Other credential settings
 Gemini models run through the [Gemini API](https://ai.google.dev/gemini-api/docs) with a key from [aistudio.google.com/apikey](https://aistudio.google.com/apikey). Paste it in the **Gemini API key** box (or set `GEMINI_API_KEY` before `pnpm api`). It's handled like the Anthropic key: memory only, last 4 characters shown.
 
 - **Mix providers per agent.** Every model picker lists Claude and Gemini models. Each agent's task goes to the provider of its model, so the designer can run on Claude Opus while engineers run on Gemini Flash. You only need a key for the providers your chosen models use; the start screen tells you which is missing and why.
-- **Models offered:** Gemini 3.1 Flash-Lite, 2.5 Flash, 3.5 Flash and 3.1 Pro (preview). Escalated tickets move one tier up within the engineers' provider.
-- **Key check:** when you save a Gemini key, the server asks Google to list one model (a free call). A rejected key is refused on the spot; if Google can't be reached, the key is saved and the first agent call decides.
+- **Models offered:** whatever Google says your key can use. Saving a Gemini key (or pressing *Check key and load its models*) lists the key's models with a free call, and the pickers show exactly those; model ids change often and differ by account, so nothing is hardcoded beyond a fallback list for when Google can't be reached. A rejected key is refused on the spot. Escalated tickets move one tier up within the engineers' provider.
 - **How Gemini agents work:** there's no agent SDK on this side, so Switchyard runs the loop itself (`packages/engine/src/agents/gemini.ts`): call the model, run the tools it asks for, hand back the results, repeat. The tools (`tools.ts`) are read, list, search, write, edit and run a command. File tools can't leave the ticket's worktree, and commands never see your API keys.
 - **Spend:** counted from each call's token usage times the price table in `gemini.ts` (`GEMINI_PRICES`, from Google's pricing page, November 2026; thinking tokens bill as output). Update the table when prices change, since the CFO's budgets depend on it. Unknown models are priced at the top rate so spend is never under-counted.
 - **Rate limits:** on a 429 or 503 the agent waits and retries up to three times. Free-tier keys have low limits, so several engineers in parallel may be slow; use 1 engineer per area or add billing.
@@ -153,6 +153,7 @@ apps/web/              Next.js dashboard
 | POST | `/api/tickets/:id/retry` | `{ guidance? }` |
 | POST | `/api/tickets/:id/skip` | |
 | POST | `/api/stop` | |
+| POST | `/api/retry` | try a failed run again from the failed step |
 | POST | `/api/pause` / `/api/resume` | |
 | POST | `/api/changes` | `{ request }` |
 | PUT | `/api/models` | `{ models: { designer: "claude-opus-5-5", ... } }` |

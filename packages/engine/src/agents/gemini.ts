@@ -161,7 +161,7 @@ export class GeminiRunner implements AgentRunner {
       return { ok: false, text, costUsd, error: `ran out of turns (${maxTurns})` };
     } catch (err) {
       if (signal?.aborted) return { ok: false, text, costUsd, error: "stopped" };
-      return { ok: false, text, costUsd, error: explain(err) };
+      return { ok: false, text, costUsd, error: explain(err, model) };
     }
   }
 
@@ -213,12 +213,14 @@ function statusOf(err: unknown): number | undefined {
 }
 
 /** Errors a CEO can act on, in plain words. */
-function explain(err: unknown): string {
+function explain(err: unknown, model: string): string {
   const status = statusOf(err);
   const raw = err instanceof Error ? err.message : String(err);
   if (status === 400 && /API key not valid|API_KEY_INVALID/i.test(raw)) return "Gemini rejected the API key. Check it in the start screen.";
   if (status === 401 || status === 403) return "Gemini refused the API key (no access to this model, or the key is restricted).";
-  if (status === 404) return "Gemini doesn't know this model id. Pick another model.";
+  if (status === 404) {
+    return `Your Gemini key can't use the model "${model}" (Google doesn't offer it to this key, or has retired it). Pick another model for this agent under Models, then try again.`;
+  }
   if (status === 429) return "Gemini's rate limit or quota was hit, even after waiting. Free-tier keys have low limits; add billing or use a smaller model.";
   if (/fetch failed|ENOTFOUND|ECONNRE|ETIMEDOUT|network/i.test(raw)) {
     return "Couldn't reach the Gemini API (generativelanguage.googleapis.com). Check this machine's internet connection or proxy.";

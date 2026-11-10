@@ -135,6 +135,8 @@ export class Orchestrator {
   private resuming = false;
   /** The CEO rewrote the brief before the build, so the plan restarts from the PRD. */
   private revisedBrief = false;
+  /** Trying a failed plan again: approved steps already saved in the repo are kept. */
+  private retrying = false;
   private repo: ProjectRepo | null = null;
   private prd = "";
   private architecture = "";
@@ -345,6 +347,31 @@ export class Orchestrator {
       ).then(() => undefined);
     }
     return this.restartPlan(next);
+  }
+
+  /**
+   * Try a failed plan again from the step that broke, e.g. after switching
+   * an agent to a model that works. The approved PRD and brand are kept.
+   * A run that failed after tickets were filed resumes from the board instead.
+   */
+  retryPlan(): void {
+    const p = this.board.project;
+    if (!p || p.phase !== "failed") throw new Error("Only a failed run can be tried again");
+    if (this.isRunning) throw new Error("The last run is still winding down. Try again in a few seconds.");
+    this.abort = new AbortController();
+    this.board.log("info", "CEO asked to try again from the step that failed");
+    if (this.board.tickets.some((t) => !t.earlier)) {
+      this.board.updateProject({ phase: "building", held: false });
+      this.buildLoop = null;
+      void this.ensureBuildLoop();
+      return;
+    }
+    this.retrying = true;
+    this.board.updateProject({ phase: "planning" });
+    this.pipeline = this.runPipeline(p.idea).finally(() => {
+      this.pipeline = null;
+      this.retrying = false;
+    });
   }
 
   /** Abandon the planning step in progress and plan again from the PRD with the new brief. */
@@ -585,7 +612,9 @@ export class Orchestrator {
       const currentPrd =
         this.existing || this.revisedBrief ? repo.readMain("docs/PRD.md") || (this.existing ? repo.readMain("README.md") : "") : "";
       const updating = !!currentPrd;
-      this.prd = await this.untilApproved("prd", async (feedback, previous) => {
+      const approvedPrd = this.retrying ? repo.readMain("docs/PRD.md") : "";
+      if (approvedPrd) this.board.log("info", "Keeping the PRD you already approved");
+      this.prd = approvedPrd || await this.untilApproved("prd", async (feedback, previous) => {
         this.board.updateProject({ phase: "planning" });
         const res = await this.runAgent(IDS.pm, {
           kind: "prd",
@@ -599,7 +628,7 @@ export class Orchestrator {
         });
         return { title: updating ? "Approve the updated PRD" : "Approve the PRD", content: res.text, value: res.text };
       });
-      await repo.commitToMain({ "docs/PRD.md": this.prd }, updating ? "PM: update PRD" : "PM: add PRD");
+      if (!approvedPrd) await repo.commitToMain({ "docs/PRD.md": this.prd }, updating ? "PM: update PRD" : "PM: add PRD");
 
       // 2. Brand (marketing), then design (designer, signed off by the PM)
       await this.brandPhase(idea);

@@ -852,6 +852,10 @@ h3 {
   color: var(--review);
   font-size: 14px;
 }
+.controls .held.failed {
+  background: var(--fail-soft, #fbe9e4);
+  color: var(--fail);
+}
 .controls .change {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;

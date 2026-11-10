@@ -622,6 +622,35 @@ describe("revising the brief", () => {
   }, 30_000);
 });
 
+describe("trying a failed plan again", () => {
+  it("restarts at the step that failed, keeping the approved PRD and brand", async () => {
+    let failDesign = true;
+    const mock = new MockRunner({ stepMs: 0 });
+    const runner: AgentRunner = {
+      name: "flaky",
+      run: (t, on, sig) =>
+        t.kind === "design" && failDesign
+          ? Promise.resolve({ ok: false, text: "", costUsd: 0, error: 'Your Gemini key can\'t use the model "gemini-x"' })
+          : mock.run(t, on, sig),
+    };
+    const orch = new Orchestrator(runner, { workspaceDir: workspace(), autoApprove: "all", tickMs: 5, qaRounds: 0 });
+    orch.start("A notes app");
+    await waitFor(() => (orch.board.project?.phase === "failed" ? true : undefined));
+    await orch.whenIdle();
+    expect(orch.board.snapshot().log.at(-1)!.message).toContain("gemini-x");
+
+    failDesign = false;
+    orch.retryPlan();
+    await orch.whenIdle();
+    expect(orch.board.project!.phase).toBe("shipped");
+    const kinds = orch.board.gates.map((g) => g.kind);
+    expect(kinds.filter((k) => k === "prd")).toHaveLength(1);
+    expect(kinds.filter((k) => k === "brand")).toHaveLength(1);
+    expect(kinds).toContain("design");
+    expect(() => orch.retryPlan()).toThrow("Only a failed run");
+  }, 30_000);
+});
+
 describe("marketing and design", () => {
   it("brands the product, designs it, has the PM check feasibility, and writes launch copy", async () => {
     const orch = new Orchestrator(new MockRunner({ stepMs: 0, pmPushesBackDesign: "once" }), {

@@ -79,6 +79,20 @@ export default function Home() {
       <Brief project={state.project} releasePending={state.gates.some((g) => g.kind === "release" && g.status === "pending")} />
       <Decision gates={state.gates} />
       {steering && <Controls project={state.project} />}
+      {phase === "failed" && (
+        <section className="controls" aria-label="The run failed">
+          <div className="held failed">
+            <span>
+              <strong>The run stopped on an error.</strong> {[...state.log].reverse().find((l) => l.level === "error")?.message ?? ""} Fix the
+              cause (for a model problem, change it under Models in the team panel), then try again. What you already
+              approved is kept.
+            </span>
+            <button className="btn" onClick={() => void api.retryRun().catch(() => undefined)}>
+              Try again
+            </button>
+          </div>
+        </section>
+      )}
       <div className="floor">
         <Team agents={state.agents} areas={state.areas} project={state.project} />
         <div>
